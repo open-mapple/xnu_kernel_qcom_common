@@ -506,6 +506,14 @@ start_cpu:
 	.globl EXT(start_first_cpu)
 LEXT(start_first_cpu)
 
+#if defined(FUXI)
+	adrp x16, EXT(fuxi_early_status)@page
+	add x16, x16, EXT(fuxi_early_status)@pageoff
+	mov x17, #1
+	str x17, [x16]
+	dsb sy
+#endif
+
 	// Unlock the core for debugging
 	msr		OSLAR_EL1, xzr
 	msr		DAIFSet, #(DAIFSC_ALL)				// Disable all interrupts
@@ -719,6 +727,14 @@ Lkernelcache_base_found:
  */
 common_start:
 
+#if defined(FUXI)
+	adrp x16, EXT(fuxi_early_status)@page
+	add x16, x16, EXT(fuxi_early_status)@pageoff
+	mov x17, #2
+	str x17, [x16]
+	dsb sy
+#endif
+
 #if HAS_NEX_PG
 	mov x19, lr
 	bl		EXT(set_nex_pg)
@@ -833,9 +849,26 @@ common_start:
 #endif /* HAS_APPLE_PAC */
 
 	// Enable caches, MMU, ROP and JOP
+
+#if defined(FUXI)
+	adrp x16, EXT(fuxi_early_status)@page
+	add x16, x16, EXT(fuxi_early_status)@pageoff
+	mov x17, #3
+	str x17, [x16]
+	dsb sy
+#endif
 	MOV64   x0, SCTLR_EL1_DEFAULT
 	MSR_SCTLR_EL1_X0
 	isb		sy
+
+#if defined(FUXI)
+	adrp x16, EXT(fuxi_early_status)@page
+	add x16, x16, EXT(fuxi_early_status)@pageoff
+	mov x17, #4
+	str x17, [x16]
+	dc cvac, x16
+	dsb sy
+#endif
 
 #if !VMAPPLE && !defined(SWEET)
 	MOV64   x1, SCTLR_EL1_DEFAULT
