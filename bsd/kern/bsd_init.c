@@ -803,6 +803,10 @@ bsd_init(void)
 
 	bsd_init_kprintf("calling bsd_autoconf\n");
 	bsd_autoconf();
+#if defined(FUXI)
+    extern void fuxi_storage_probe(void);
+    fuxi_storage_probe();
+#endif
 
 #if CONFIG_DTRACE
 	dtrace_postinit();
