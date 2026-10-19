@@ -1425,11 +1425,19 @@ machine_conf(void)
 void
 machine_init(void)
 {
+	printf("SWEET BF: machine_init: debug_log_init enter\n");
 	debug_log_init();
+	printf("SWEET BF: machine_init: debug_log_init ok\n");
+	printf("SWEET BF: machine_init: clock_config enter\n");
 	clock_config();
+	printf("SWEET BF: machine_init: clock_config ok\n");
 	is_clock_configured = TRUE;
 	if (debug_enabled) {
+		printf("SWEET BF: machine_init: pmap_map_globals enter\n");
 		pmap_map_globals();
+		printf("SWEET BF: machine_init: pmap_map_globals ok\n");
 	}
+	printf("SWEET BF: machine_init: ml_lockdown_init enter\n");
 	ml_lockdown_init();
+	printf("SWEET BF: machine_init: ml_lockdown_init ok\n");
 }
