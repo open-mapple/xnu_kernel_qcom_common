@@ -38,13 +38,21 @@ const char * gIOKernelConfigTables =
     "   {"
     "     'IOClass'         = SweetPlatformExpert;"
     "     'IOProviderClass' = IOPlatformExpertDevice;"
+#if defined(FUXI)
+    "     'IONameMatch'     = 'xiaomi,fuxi';"
+#else
     "     'IONameMatch'     = 'xiaomi,sweet';"
+#endif
     "     'IOProbeScore'    = 10000:32;"
     "   },"
     "   {"
     "     'IOClass'         = SweetCPU;"
     "     'IOProviderClass' = IOPlatformDevice;"
+#if defined(FUXI)
+    "     'IONameMatch'     = 'qcom,sm8550-cpu';"
+#else
     "     'IONameMatch'     = 'qcom,kryo470';"
+#endif
     "     'IOProbeScore'    = 10000:32;"
     "   },"
     "   {"
