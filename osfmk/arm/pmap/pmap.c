@@ -6881,7 +6881,22 @@ void
 pmap_sync_page_attributes_phys(
 	ppnum_t pp)
 {
-	flush_dcache((vm_offset_t) (pp << PAGE_SHIFT), PAGE_SIZE, TRUE);
+	/* ppnum_t is 32-bit: widen BEFORE shifting or RAM above 4 GiB wraps. */
+	vm_offset_t pa = (vm_offset_t)pp << PAGE_SHIFT;
+#if defined(FUXI)
+	/* The GPU reservation is excluded from VM/physmap. Never send its PA
+	 * to the physical cache helpers; reuse its existing bounded NC alias. */
+	extern uintptr_t fuxi_gpu_nc_pointer(uint64_t, uint64_t);
+	vm_offset_t nc = fuxi_gpu_nc_pointer(pa, PAGE_SIZE);
+	if (nc) {
+		flush_dcache(nc, PAGE_SIZE, FALSE);
+		return;
+	}
+	if (pa < gPhysBase || pa - gPhysBase >= gPhysSize) {
+		panic("FUXI GPU: cache sync outside RAM/NC windows: %#llx", (uint64_t)pa);
+	}
+#endif
+	flush_dcache(pa, PAGE_SIZE, TRUE);
 }
 
 #if CONFIG_COREDUMP
