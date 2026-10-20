@@ -1539,6 +1539,18 @@ handle_kernel_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_ad
 		panic_with_thread_kernel_state("Unexpected abort while on interrupt stack.", state);
 	}
 
+#if defined(FUXI)
+	extern char fuxi_gpu_access_begin[], fuxi_gpu_access_end[];
+	uintptr_t gpu_pc = get_saved_state_pc(state);
+	if (recover && gpu_pc >= (uintptr_t)fuxi_gpu_access_begin &&
+	    gpu_pc < (uintptr_t)fuxi_gpu_access_end) {
+		/* Recover precise GPU device aborts, including external aborts.
+		 * No recovery is extended to any other kernel access. */
+		handle_kernel_abort_recover(state, esr, fault_addr, thread);
+		return;
+	}
+#endif
+
 	if (is_vm_fault(fault_code)) {
 		kern_return_t result = KERN_FAILURE;
 		vm_map_t      map;

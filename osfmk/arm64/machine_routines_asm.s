@@ -1311,6 +1311,48 @@ Lsign_ret:
 
 #endif // defined(HAS_APPLE_PAC)
 
+#if defined(FUXI)
+/* GPU lane: device loads/stores may abort when TZ owns a register/bank.
+ * This range joins XNU's existing synchronous data-abort recovery table.
+ * w0 = failure; x1 points to a kernel stack word; w2 write; w3 64-bit.
+ * The out-word store is outside the recovered range (always valid RAM).
+ */
+.align 3
+.globl _fuxi_gpu_access
+_fuxi_gpu_access:
+    cbz w2, Lfg_read
+    ldr x4, [x1]
+    COPYIO_RECOVER_RANGE Lfg_end, Lfg_fault
+    .globl _fuxi_gpu_access_begin
+_fuxi_gpu_access_begin:
+    cbz w3, Lfg_write32
+    str x4, [x0]
+    b Lfg_barrier
+Lfg_write32:
+    str w4, [x0]
+    b Lfg_barrier
+Lfg_read:
+    COPYIO_RECOVER_RANGE Lfg_end, Lfg_fault
+    cbz w3, Lfg_read32
+    ldr x4, [x0]
+    b Lfg_barrier
+Lfg_read32:
+    ldr w4, [x0]
+Lfg_barrier:
+    dsb sy
+Lfg_end:
+    .globl _fuxi_gpu_access_end
+_fuxi_gpu_access_end:
+    cbnz w2, Lfg_ok
+    str x4, [x1]
+Lfg_ok:
+    mov w0, #0
+    ret
+Lfg_fault:
+    mov w0, #1
+    ret
+#endif
+
     /* THIS MUST STAY LAST IN THIS FILE */
 	COPYIO_RECOVER_TABLE_SYM	copyio_recover_table_end
 
