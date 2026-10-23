@@ -434,10 +434,17 @@ SweetHIDTouch::start(IOService *provider)
 	}
 	int native = 0;
 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
-	fLogicalW = native ? 1080 : 1125;
-	fLogicalH = native ? 2400 : 2436;
-	fOffX = (fLogicalW - 1080) / 2;
-	fOffY = (fLogicalH - 2400) / 2;
+	/* Panel = the boot framebuffer: 1080x2400 on sweet, 1080x2340 on sunfish. */
+	PE_Video video = {};
+	int panelW = 1080, panelH = 2400;
+	if (PE_current_console(&video) == 0 && video.v_width && video.v_height) {
+		panelW = (int)video.v_width;
+		panelH = (int)video.v_height;
+	}
+	fLogicalW = native ? panelW : 1125;
+	fLogicalH = native ? panelH : 2436;
+	fOffX = (fLogicalW - panelW) / 2;
+	fOffY = (fLogicalH - panelH) / 2;
 	/* The digitizer covers the main display (backboardd maps it 1:1). */
 	setProperty("DisplayIntegrated", kOSBooleanTrue);
 	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
