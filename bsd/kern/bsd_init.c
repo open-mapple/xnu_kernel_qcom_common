@@ -871,6 +871,13 @@ bsd_init(void)
 	 */
 	bsd_init_kprintf("calling net_init_run\n");
 	net_init_run();
+#if defined(FUXI)
+	/* P-WIFI: must run after Ethernet/protocol initialization, before launchd. */
+	{
+		extern void fuxi_wifi_ios_init(void);
+		fuxi_wifi_ios_init();
+	}
+#endif
 #endif /* NETWORKING */
 
 	bsd_init_kprintf("calling inittodr\n");
