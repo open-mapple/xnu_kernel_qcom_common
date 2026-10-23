@@ -18,6 +18,7 @@
  */
 #include <IOKit/IOLib.h>
 #include <IOKit/IOService.h>
+#include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <libkern/c++/OSArray.h>
 #include <pexpert/pexpert.h>
@@ -444,8 +445,22 @@ SweetHIDTouch::start(IOService *provider)
 	}
 	fPanelW = panelW;
 	fPanelH = panelH;
-	fLogicalW = native ? panelW : 1125;
-	fLogicalH = native ? panelH : 2436;
+	/* Scaled canvas (SweetFramebuffer.cpp): the digitizer covers the whole display, no crop. */
+	bool scaled = false;
+	IORegistryEntry *disp = IORegistryEntry::fromPath("/arm-io/disp0", gIODTPlane);
+	if (disp != NULL) {
+		OSData *cw = OSDynamicCast(OSData, disp->getProperty("canvas-width"));
+		OSData *ch = OSDynamicCast(OSData, disp->getProperty("canvas-height"));
+		uint32_t canvasW = 0, canvasH = 0;
+		if (cw != NULL && ch != NULL && cw->getLength() == 4 && ch->getLength() == 4) {
+			memcpy(&canvasW, cw->getBytesNoCopy(), 4);
+			memcpy(&canvasH, ch->getBytesNoCopy(), 4);
+		}
+		scaled = canvasW != 0 && canvasH != 0 && (int)canvasW < panelW && (int)canvasH < panelH;
+		disp->release();
+	}
+	fLogicalW = (native || scaled) ? panelW : 1125;
+	fLogicalH = (native || scaled) ? panelH : 2436;
 	fOffX = (fLogicalW - panelW) / 2;
 	fOffY = (fLogicalH - panelH) / 2;
 	/* The digitizer covers the main display (backboardd maps it 1:1). */
