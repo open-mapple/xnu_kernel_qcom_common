@@ -6656,7 +6656,34 @@ handle_mac_transition:
 	}
 
 	/* Update the process' identity version and set the security token */
+#if defined(FUXI)
+	/*
+	 * fuxixpcid=1 (patch 0105): xpcproxy execs the real daemon in place. Keep
+	 * the pid version of that exec so the audit token launchd recorded for
+	 * the spawn still names the daemon; otherwise launchd can treat the job
+	 * as a new instance and respawn it (HackiOS xnu/redwood.patch, APSL 2.0).
+	 * p_comm is still the old image name here (set_proc_name runs later).
+	 */
+	{
+		static int fuxi_xpcid = -1;
+		static uint32_t fuxi_xpcid_logged;
+		if (fuxi_xpcid < 0) {
+			uint32_t v = 0;
+			fuxi_xpcid = (PE_parse_boot_argn("fuxixpcid", &v, sizeof(v)) && v == 1) ? 1 : 0;
+		}
+		if (fuxi_xpcid == 1 && strcmp(p->p_comm, "xpcproxy") == 0) {
+			if (fuxi_xpcid_logged < 8) {
+				fuxi_xpcid_logged++;
+				printf("FUXI IDLE: xpcproxy pid %d exec keeps pidversion %d (fuxixpcid=1)\n",
+				    proc_getpid(p), proc_pidversion(p));
+			}
+		} else {
+			proc_setpidversion(p, OSIncrementAtomic(&nextpidversion));
+		}
+	}
+#else
 	proc_setpidversion(p, OSIncrementAtomic(&nextpidversion));
+#endif
 	task_set_uniqueid(task);
 	set_security_token_task_internal(p, task);
 

@@ -4740,6 +4740,10 @@ sched_ipi_deferred_policy(processor_set_t pset, processor_t dst,
 	return SCHED_IPI_NONE;
 }
 
+#if defined(FUXI)
+extern void fuxi_idle_ipi_wake(thread_t thread, int ipi_type);	/* osfmk/arm64/fuxi_idle.c (patch 0105) */
+#endif
+
 sched_ipi_type_t
 sched_ipi_action(processor_t dst, thread_t thread, sched_ipi_event_t event)
 {
@@ -4773,6 +4777,9 @@ sched_ipi_action(processor_t dst, thread_t thread, sched_ipi_event_t event)
 		bit_set(pset->pending_AST_PREEMPT_cpu_mask, dst->cpu_id);
 		break;
 	}
+#if defined(FUXI)
+	fuxi_idle_ipi_wake(thread, (int)ipi_type);	/* fuxicpuload: ipiwake line */
+#endif
 	return ipi_type;
 }
 

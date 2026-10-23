@@ -258,6 +258,10 @@ void cpu_signal_handler(void);
 extern unsigned int gFastIPI;
 #endif /* defined(HAS_IPI) */
 
+#if defined(FUXI)
+extern void fuxi_idle_sgi(unsigned int intid);	/* osfmk/arm64/fuxi_idle.c (patch 0105) */
+#endif
+
 static arm_saved_state64_t *original_faulting_state = NULL;
 
 TUNABLE(bool, fp_exceptions_enabled, "-fp_exceptions", false);
@@ -1891,6 +1895,11 @@ sleh_irq(arm_saved_state_t *state)
 		/* Ack before handling so an IPI raised meanwhile is not lost */
 		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
 		__builtin_arm_isb(ISB_SY);
+#if defined(FUXI)
+		if (intid != SWEET_IPI_SGI) {
+			fuxi_idle_sgi(intid);	/* fuxicpuload: ipirx g */
+		}
+#endif
 		cpu_signal_handler();
 	} else {
 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_OTHER);

@@ -556,6 +556,15 @@ static uint32_t         gDarkWakeFlags = kDarkWakeFlagPromotionEarly;
 
 static uint32_t         gNoIdleFlag = 0;
 static uint32_t         gSleepDisabledFlag = 0;
+#if defined(FUXI)
+/* fuxinosleep=1 (patch 0105): refuse every system sleep. The port has no
+ * working sleep/wake path; powerd asks for idle sleep after the display goes
+ * off and IOCPUSleepKernel then hangs (HackiOS xnu/redwood.patch, APSL 2.0).
+ * Kept apart from gSleepDisabledFlag, which "sleep-disabled" in the device
+ * tree overwrites at boot complete. */
+static uint32_t         gFuxiNoSleep = 0;
+static uint64_t         gFuxiNoSleepCount = 0;
+#endif
 static uint32_t         gSwdPanic = 1;
 static uint32_t         gSwdSleepTimeout = 0;
 static uint32_t         gSwdWakeTimeout = 0;
@@ -1592,6 +1601,15 @@ IOPMrootDomain::start( IOService * nub )
 	PE_parse_boot_argn("swd_timeout", &gSwdSleepWakeTimeout, sizeof(gSwdSleepWakeTimeout));
 	PE_parse_boot_argn("haltmspanic", &gHaltTimeMaxPanic, sizeof(gHaltTimeMaxPanic));
 	PE_parse_boot_argn("haltmslog", &gHaltTimeMaxLog, sizeof(gHaltTimeMaxLog));
+#if defined(FUXI)
+	{
+		uint32_t nosleep = 0;
+		if (PE_parse_boot_argn("fuxinosleep", &nosleep, sizeof(nosleep)) && nosleep == 1) {
+			gFuxiNoSleep = 1;
+			IOLog("FUXI IDLE: system sleep refused (fuxinosleep=1)\n");
+		}
+	}
+#endif
 
 	// read noidle setting from Device Tree
 	if (PE_get_default("no-idle", &gNoIdleFlag, sizeof(gNoIdleFlag))) {
@@ -7380,6 +7398,17 @@ IOPMrootDomain::checkSystemSleepAllowed( IOOptionBits options,
 	// Conditions that prevent idle and demand system sleep.
 
 	do {
+#if defined(FUXI)
+		if (gFuxiNoSleep) {
+			gFuxiNoSleepCount++;
+			if (gFuxiNoSleepCount && !(gFuxiNoSleepCount & (gFuxiNoSleepCount - 1))) {
+				IOLog("FUXI IDLE: system sleep refused (fuxinosleep=1) reason %u options 0x%x count %llu\n",
+				    sleepReason, (unsigned)options, gFuxiNoSleepCount);
+			}
+			err = kPMConfigPreventSystemSleep;
+			break;
+		}
+#endif
 		if (gSleepDisabledFlag) {
 			err = kPMConfigPreventSystemSleep;
 			break;

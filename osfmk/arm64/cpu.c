@@ -111,6 +111,10 @@ extern void typhoon_return_from_wfi(void);
 extern void arm64_retention_wfi(void);
 #endif
 
+#if defined(FUXI)
+extern void fuxi_idle_cache_enter(void);	/* osfmk/arm64/fuxi_idle.c (patch 0105) */
+#endif
+
 sysreg_restore_t sysreg_restore __attribute__((section("__DATA, __const"))) = {
 	.tcr_el1 = TCR_EL1_BOOT,
 };
@@ -569,7 +573,12 @@ cpu_idle(void)
 
 	if (wfi) {
 #if !defined(APPLE_ARM64_ARCH_FAMILY)
+#if defined(FUXI)
+		/* Same flush unless fuxinoidleflush=1; fuxicpuload also times it. */
+		fuxi_idle_cache_enter();
+#else
 		platform_cache_idle_enter();
+#endif
 #endif
 
 #if DEVELOPMENT || DEBUG

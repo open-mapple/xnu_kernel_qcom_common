@@ -572,6 +572,10 @@ cpu_has_SIGPdebug_pending(void)
 	return cpu_data_ptr->cpu_signal & SIGPdebug;
 }
 
+#if defined(FUXI)
+extern void fuxi_idle_ipi_seen(unsigned int signal);	/* osfmk/arm64/fuxi_idle.c (patch 0105) */
+#endif
+
 void
 cpu_signal_handler_internal(boolean_t disable_signal)
 {
@@ -591,6 +595,9 @@ cpu_signal_handler_internal(boolean_t disable_signal)
 	 * handlers.
 	 */
 	cpu_signal = os_atomic_or(&cpu_data_ptr->cpu_signal, 0, acquire);
+#if defined(FUXI)
+	fuxi_idle_ipi_seen(cpu_signal);	/* fuxicpuload: ipirx line */
+#endif
 
 	if ((!(cpu_signal & SIGPdisabled)) && (disable_signal == TRUE)) {
 		os_atomic_or(&cpu_data_ptr->cpu_signal, SIGPdisabled, relaxed);
