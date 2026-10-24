@@ -1,5 +1,5 @@
 /*
- * SM7150 Adreno 618 bring-up (docs/GPU_A618_PLAN.md), stages 0 and 1.
+ * SM7150 Adreno 618 bring-up (docs/GPU_A618_PLAN.md), stages 0, 1 and 2A.
  *
  * Boot-arg sweetgpu=N (N >= 1) starts a thread sweetgpudelay seconds after
  * boot (default 40, so the home screen is up first). Stage 0 (N >= 1) only
@@ -27,10 +27,28 @@
  *    cx_gmu, cx_snoc_dvm and cx_apb branches;
  *  - reads CX-side GMU registers, the GMU always-on counter, the first ITCM
  *    words and cx_misc.
- * GX stays off: nothing in the 0x5000000 GPU block is touched, and the gx_*
- * clocks, the GX GDSC and the GPU PLLs are only read. GMU and cx_misc offsets
- * come from the generated sweet_gpu_regs.h; GCC and gpucc offsets from the
- * downstream drivers above. Everything stays on after stage 1.
+ * In stage 1 GX stays off: nothing in the 0x5000000 GPU block is touched, and
+ * the gx_* clocks, the GX GDSC and the GPU PLLs are only read.
+ * Stage 2A (N >= 3) powers GX from the host, without the GMU firmware, at the
+ * lowest corner (180 MHz), in the order the downstream drivers would:
+ *  - RPMh: mx.lvl, then gfx.lvl, to the first level >= LOW_SVS (vlvl 64),
+ *    which gdsc-regulator.c votes on the GX GDSC's parent before enabling
+ *    it; 180 MHz needs MIN_SVS (gpucc vdd_gx), and gfx.lvl has no level
+ *    below 64. mx goes first and stays >= gfx (rpmhpd/GMU rule);
+ *  - PLL0 (Fabia, MX rail, clk-alpha-pll.c): the gpu_cc_pll0_config values
+ *    at 360 MHz with the even post-divider at 2, out of reset, RUN, lock;
+ *  - gfx3d RCG: root forced on (FORCE_ENABLE_RCG), then crc_div (PLL0 even
+ *    = 180 MHz) divider 1;
+ *  - GX GDSC (gdsc-regulator.c, toggle_logic with sw-reset, domain-addr and
+ *    reset-aon-logic): BCR pulse, GMEM reset pulse, unclamp, un-collapse,
+ *    poll PWR_ON. On timeout it collapses and clamps again;
+ *  - gx_cxo, gx_gmu, gx_gfx3d and cx_gfx3d branches;
+ *  - SPTP head switch through the GMU (a6xx_sptprac_enable);
+ *  - only if the GMU sees the GX head switch and its clock on: RBBM_STATUS,
+ *    RBBM_CLOCK_CNTL and the CP always-on counter, the first GX reads.
+ * GMU and cx_misc offsets come from the generated sweet_gpu_regs.h; GCC and
+ * gpucc offsets from the downstream drivers above. Everything stays on after
+ * the last stage that runs.
  * Before every access that could hang the bus it logs and sleeps
  * SWEET_GPU_PAUSE_MS, so the persistent log (sweetlog=1 ufslogsecs=1) ends
  * at the last good step, and every step logs its result: one stuck core does
@@ -52,6 +70,7 @@
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern int sweet_rpmh_cmddb_dump(void);
+extern int sweet_rpmh_arc_vote(const char *res, unsigned vlvl, unsigned *hlvl);
 void sweet_gpu_init(void);
 
 #define SWEET_GPU_DELAY_S       40u
@@ -110,6 +129,53 @@ void sweet_gpu_init(void);
 #define RCG_CMD_UPDATE          (1u << 0)
 #define RCG_CFG_MASK            (0x1fu | (7u << 8) | (3u << 12) | (1u << 20))
 #define RCG_CFG_GMU_200MHZ      ((6u << 8) | 2u) /* gpll0_out_main_div (300 MHz), divider 1.5 */
+
+/* Stage 2A. gpucc GX side (gpucc-sdmmagpie.c, sdmmagpie-gdsc.dtsi) */
+#define GPUCC_GX_BCR            0x1008u         /* GX GDSC sw-reset: BLK_ARES bit 0 */
+#define GPUCC_GX_GFX3D_RCG      0x101cu         /* +0 CMD, +4 CFG; hid_width 5 */
+#define GPUCC_GX_GFX3D_CBCR     0x1054u         /* BRANCH_HALT_SKIP */
+#define GPUCC_GX_CXO_CBCR       0x1060u
+#define GPUCC_GX_GMU_CBCR       0x1064u
+#define GPUCC_CX_GFX3D_CBCR     0x10a4u         /* BRANCH_HALT_DELAY */
+/* Fabia PLL registers from the PLL base (clk-alpha-pll.c) */
+#define PLL_MODE                0x00u
+#define PLL_L                   0x04u
+#define PLL_CAL_L               0x08u
+#define PLL_USER_CTL            0x0cu
+#define PLL_USER_CTL_U          0x10u
+#define PLL_CONFIG_CTL          0x14u
+#define PLL_CONFIG_CTL_U        0x18u
+#define PLL_TEST_CTL_U          0x20u
+#define PLL_OPMODE              0x2cu
+#define PLL_FRAC                0x38u
+#define PLL_MODE_OUTCTRL        (1u << 0)
+#define PLL_MODE_RESET_N        (1u << 2)
+#define PLL_MODE_FSM_ENA        (1u << 20)
+#define PLL_MODE_UPDATE_BYPASS  (1u << 23)      /* HW_UPDATE_LOGIC_BYPASS */
+#define PLL_MODE_LOCK_DET       (1u << 31)
+#define PLL_OPMODE_STANDBY      0u
+#define PLL_OPMODE_RUN          1u
+#define PLL_OUT_ALL             7u              /* main, even, odd */
+/* gpu_cc_pll0_config: 19.2 MHz * (0x12 + 0xc000 / 2^16) = 360 MHz */
+#define PLL0_L                  0x12u
+#define PLL0_FRAC               0xc000u
+#define PLL0_CAL_L              0x3fu
+#define PLL0_CONFIG_CTL         0x20485699u
+#define PLL0_CONFIG_CTL_U       0x00002067u
+#define PLL0_USER_CTL           (1u | (1u << 8)) /* main output; even post-divider 2 (table value 1) */
+#define PLL0_USER_CTL_U         0x00004805u
+#define PLL0_TEST_CTL_U         0x40000000u
+#define RCG_CMD_ROOT_EN         (1u << 1)
+#define RCG_CMD_ROOT_OFF        (1u << 31)
+#define RCG_CFG_GFX3D_180MHZ    ((1u << 8) | 1u) /* crc_div (PLL0 even, 180 MHz), divider 1 */
+#define GX_DOMAIN_CLAMP_IO      (1u << 0)
+#define GX_DOMAIN_GMEM_RESET    (1u << 4)
+#define BCR_BLK_ARES            (1u << 0)
+#define SPTPRAC_POWER_ON        0x778000u       /* a6xx_sptprac_enable */
+#define SPTPRAC_ON_MASK         0x38u
+#define SPTPRAC_ON_WANT         0x28u           /* SPTP GDSC on, SP clock on, GMU up */
+#define RPMH_VLVL_LOW_SVS       64u
+#define GPU_REGS_SIZE           0x10000u
 
 enum { BLOB_SQE, BLOB_GMU, BLOB_ZAP_MDT, BLOB_ZAP_B02, BLOB_COUNT };
 
@@ -497,15 +563,16 @@ gpu_gmu_reads(vm_offset_t gmu, vm_offset_t cc)
 	printf("SWEET GPU:   GMU always-on counter %llu -> %llu (+%llu in 1 ms)\n", t0, t1, t1 - t0);
 }
 
-static void
-gpu_stage1(void)
+/* True with *ccp and *gmup set when the CX side is up for stage 2A. */
+static bool
+gpu_stage1(vm_offset_t *ccp, vm_offset_t *gmup)
 {
 	printf("SWEET GPU: stage 1 (sweetgpu=%d): CX clocks and GDSC, then CX-side reads; GX untouched\n", gpu_level);
 	vm_offset_t gcc = ml_io_map(GCC_PA, GCC_SIZE), cc = ml_io_map(GPUCC_PA, GPUCC_SIZE);
 	vm_offset_t gmu = ml_io_map(GMU_PA, GMU_SIZE), cxm = ml_io_map(CX_MISC_PA, CX_MISC_SIZE);
 	if (!gcc || !cc || !gmu || !cxm) {
 		printf("SWEET GPU: stage 1 mapping failed\n");
-		return;
+		return false;
 	}
 	bool ahb = !(gpu_rd(gcc, GCC_GPU_CFG_AHB_CBCR) & CBCR_CLK_OFF);
 	gpu_log_clocks(gcc, ahb ? cc : 0, "before");
@@ -514,32 +581,32 @@ gpu_stage1(void)
 		gpu_pause("gcc_gpu_cfg_ahb on (it is off, so gpucc is unreachable)");
 		if (!gpu_branch_on(gcc, &cfg_ahb)) {
 			printf("SWEET GPU: stage 1 stopped: gcc_gpu_cfg_ahb\n");
-			return;
+			return false;
 		}
 		gpu_log_clocks(gcc, cc, "with gpu_cfg_ahb");
 	}
 	gpu_pause("CX GDSC on (gpucc 0x509106c)");
 	if (!gpu_cx_gdsc_on(cc)) {
 		printf("SWEET GPU: stage 1 stopped: CX GDSC\n");
-		return;
+		return false;
 	}
 	gpu_log_clocks(gcc, cc, "with CX GDSC");
 	gpu_pause("GCC GPU branches and GPLL0 votes");
 	if (!gpu_gcc_on(gcc)) {
 		printf("SWEET GPU: stage 1 stopped: GCC branches\n");
-		return;
+		return false;
 	}
 	gpu_pause("GMU RCG to 200 MHz (gpucc 0x5091120)");
 	if (!gpu_gmu_rcg_200mhz(cc)) {
 		printf("SWEET GPU: stage 1 stopped: GMU RCG\n");
-		return;
+		return false;
 	}
 	gpu_pause("gpucc CX branches: ahb, cxo, cx_gmu, cx_snoc_dvm, cx_apb");
 	bool cx = gpu_cc_on(cc);
 	gpu_log_clocks(gcc, cc, "after");
 	if (!cx) {
 		printf("SWEET GPU: stage 1 stopped: gpucc branches\n");
-		return;
+		return false;
 	}
 	gpu_pause("GMU register reads (CX side of 0x506a000)");
 	gpu_gmu_reads(gmu, cc);
@@ -551,6 +618,274 @@ gpu_stage1(void)
 	printf("SWEET GPU:   cx_misc SYSTEM_CACHE_CNTL_0 0x%08x _1 0x%08x\n",
 	    gpu_rd(cxm, REG_A6XX_SYSTEM_CACHE_CNTL_0 * 4u), gpu_rd(cxm, REG_A6XX_SYSTEM_CACHE_CNTL_1 * 4u));
 	printf("SWEET GPU: stage 1 done; CX clocks and GDSC stay on\n");
+	*ccp = cc;
+	*gmup = gmu;
+	return true;
+}
+
+static void
+gmu_wr(vm_offset_t gmu, uint32_t reg, uint32_t val)
+{
+	uint32_t off = reg * 4u - (GMU_PA - GPU_PA);
+	if (reg * 4u < GMU_PA - GPU_PA || off >= GMU_SIZE) {
+		printf("SWEET GPU: register %#x is outside the GMU block; not written\n", reg);
+		return;
+	}
+	gpu_wr(gmu, off, val);
+}
+
+/* The cmd-db dump or a touch-rail vote may hold the RPMh lock briefly. */
+static bool
+gpu_rail_vote(const char *res, unsigned vlvl)
+{
+	for (unsigned tries = 0; tries < 10; ++tries) {
+		unsigned hlvl = 0;
+		int error = sweet_rpmh_arc_vote(res, vlvl, &hlvl);
+		if (error != EBUSY) {
+			printf("SWEET GPU:   %s vlvl >= %u: %s (hlvl %u, errno %d)\n", res, vlvl,
+			    error ? "FAILED" : "voted", hlvl, error);
+			return !error;
+		}
+		gpu_sleep_ms(500);
+	}
+	printf("SWEET GPU:   %s: RPMh busy; not voted\n", res);
+	return false;
+}
+
+/*
+ * The GX GDSC, its BCR and domain register, the gfx3d RCG and PLL0 are on the
+ * CX side (Linux touches them with GX off). The gx_* branch registers are read
+ * only with the GX GDSC on (gx_on).
+ */
+static void
+gpu_log_gx(vm_offset_t cc, vm_offset_t gmu, const char *when, bool gx_on)
+{
+	printf("SWEET GPU: GX %s: gx_gdscr 0x%08x gx_domain 0x%08x gx_bcr 0x%08x gfx3d_rcg 0x%08x/0x%08x "
+	    "sptprac 0x%08x\n", when, gpu_rd(cc, GPUCC_GX_GDSCR), gpu_rd(cc, GPUCC_GX_DOMAIN),
+	    gpu_rd(cc, GPUCC_GX_BCR), gpu_rd(cc, GPUCC_GX_GFX3D_RCG), gpu_rd(cc, GPUCC_GX_GFX3D_RCG + 4u),
+	    gmu_rd(gmu, REG_A6XX_GMU_SPTPRAC_PWR_CLK_STATUS));
+	printf("SWEET GPU: GX %s: pll0 mode 0x%08x L %#x cal_l %#x frac %#x user 0x%08x/0x%08x "
+	    "config 0x%08x/0x%08x opmode %#x\n", when, gpu_rd(cc, GPUCC_PLL0 + PLL_MODE),
+	    gpu_rd(cc, GPUCC_PLL0 + PLL_L), gpu_rd(cc, GPUCC_PLL0 + PLL_CAL_L), gpu_rd(cc, GPUCC_PLL0 + PLL_FRAC),
+	    gpu_rd(cc, GPUCC_PLL0 + PLL_USER_CTL), gpu_rd(cc, GPUCC_PLL0 + PLL_USER_CTL_U),
+	    gpu_rd(cc, GPUCC_PLL0 + PLL_CONFIG_CTL), gpu_rd(cc, GPUCC_PLL0 + PLL_CONFIG_CTL_U),
+	    gpu_rd(cc, GPUCC_PLL0 + PLL_OPMODE));
+	if (!gx_on) {
+		return;
+	}
+	printf("SWEET GPU: GX %s: gx_cxo 0x%08x gx_gmu 0x%08x gx_gfx3d 0x%08x cx_gfx3d 0x%08x\n", when,
+	    gpu_rd(cc, GPUCC_GX_CXO_CBCR), gpu_rd(cc, GPUCC_GX_GMU_CBCR), gpu_rd(cc, GPUCC_GX_GFX3D_CBCR),
+	    gpu_rd(cc, GPUCC_CX_GFX3D_CBCR));
+}
+
+/* clk_fabia_pll_configure, then clk_fabia_pll_enable; refuses a PLL that something else runs. */
+static bool
+gpu_pll0_360mhz(vm_offset_t cc)
+{
+	const vm_offset_t p = cc + GPUCC_PLL0;
+	uint32_t mode = gpu_rd(p, PLL_MODE), opmode = gpu_rd(p, PLL_OPMODE);
+	if ((mode & (PLL_MODE_OUTCTRL | PLL_MODE_FSM_ENA)) || opmode == PLL_OPMODE_RUN) {
+		printf("SWEET GPU:   PLL0 is in use (mode 0x%08x opmode %#x); not reprogrammed\n", mode, opmode);
+		return false;
+	}
+	gpu_wr(p, PLL_L, PLL0_L);
+	gpu_wr(p, PLL_CAL_L, PLL0_CAL_L);
+	gpu_wr(p, PLL_FRAC, PLL0_FRAC);
+	gpu_wr(p, PLL_CONFIG_CTL, PLL0_CONFIG_CTL);
+	gpu_wr(p, PLL_CONFIG_CTL_U, PLL0_CONFIG_CTL_U);
+	gpu_wr(p, PLL_USER_CTL, PLL0_USER_CTL);
+	gpu_wr(p, PLL_USER_CTL_U, PLL0_USER_CTL_U);
+	gpu_wr(p, PLL_TEST_CTL_U, PLL0_TEST_CTL_U);
+	gpu_wr(p, PLL_MODE, gpu_rd(p, PLL_MODE) | PLL_MODE_UPDATE_BYPASS);
+	gpu_wr(p, PLL_OPMODE, PLL_OPMODE_STANDBY);
+	/* Calibration runs as the PLL leaves reset (CAL_L sets its frequency). */
+	gpu_wr(p, PLL_MODE, gpu_rd(p, PLL_MODE) | PLL_MODE_RESET_N);
+	gpu_wr(p, PLL_OPMODE, PLL_OPMODE_RUN);
+	bool ok = gpu_poll(p, PLL_MODE, PLL_MODE_LOCK_DET, PLL_MODE_LOCK_DET, 200);
+	if (ok) {
+		gpu_wr(p, PLL_USER_CTL, gpu_rd(p, PLL_USER_CTL) | PLL_OUT_ALL);
+		gpu_wr(p, PLL_MODE, gpu_rd(p, PLL_MODE) | PLL_MODE_OUTCTRL);
+	} else {
+		gpu_wr(p, PLL_OPMODE, PLL_OPMODE_STANDBY);
+	}
+	printf("SWEET GPU:   PLL0 mode 0x%08x -> 0x%08x opmode %#x user 0x%08x: %s\n", mode, gpu_rd(p, PLL_MODE),
+	    gpu_rd(p, PLL_OPMODE), gpu_rd(p, PLL_USER_CTL), ok ? "locked at 360 MHz, outputs on" : "NO LOCK, back to standby");
+	return ok;
+}
+
+/* __clk_rcg2_set_rate with FORCE_ENABLE_RCG; the root stays forced on for the GX GDSC. */
+static bool
+gpu_gfx3d_rcg_180mhz(vm_offset_t cc)
+{
+	uint32_t cmd = gpu_rd(cc, GPUCC_GX_GFX3D_RCG), cfg = gpu_rd(cc, GPUCC_GX_GFX3D_RCG + 4u);
+	gpu_wr(cc, GPUCC_GX_GFX3D_RCG, cmd | RCG_CMD_ROOT_EN);
+	bool root = gpu_poll(cc, GPUCC_GX_GFX3D_RCG, RCG_CMD_ROOT_OFF, 0, 500);
+	bool ok = false;
+	if (root) {
+		gpu_wr(cc, GPUCC_GX_GFX3D_RCG + 4u, (cfg & ~RCG_CFG_MASK) | RCG_CFG_GFX3D_180MHZ);
+		gpu_wr(cc, GPUCC_GX_GFX3D_RCG, gpu_rd(cc, GPUCC_GX_GFX3D_RCG) | RCG_CMD_UPDATE);
+		ok = gpu_poll(cc, GPUCC_GX_GFX3D_RCG, RCG_CMD_UPDATE, 0, 500);
+	}
+	printf("SWEET GPU:   gfx3d RCG cmd 0x%08x -> 0x%08x, cfg 0x%08x -> 0x%08x: %s\n", cmd,
+	    gpu_rd(cc, GPUCC_GX_GFX3D_RCG), cfg, gpu_rd(cc, GPUCC_GX_GFX3D_RCG + 4u),
+	    !root ? "ROOT STILL OFF" : ok ? "180 MHz, root forced on" : "UPDATE TIMEOUT");
+	return ok;
+}
+
+/* gdsc_enable for gpu_gx_gdsc; on timeout undo it the way gdsc_disable would. */
+static bool
+gpu_gx_gdsc_on(vm_offset_t cc)
+{
+	uint32_t v = gpu_rd(cc, GPUCC_GX_GDSCR), dom = gpu_rd(cc, GPUCC_GX_DOMAIN);
+	if (v & GDSC_HW_CONTROL) {
+		printf("SWEET GPU:   GX GDSC is under HW control (0x%08x); not touched\n", v);
+		return false;
+	}
+	if ((v & GDSC_PWR_ON) && !(v & GDSC_SW_COLLAPSE)) {
+		printf("SWEET GPU:   GX GDSC already on: gdscr 0x%08x domain 0x%08x\n", v, dom);
+		return true;
+	}
+	uint32_t bcr = gpu_rd(cc, GPUCC_GX_BCR);
+	gpu_wr(cc, GPUCC_GX_BCR, bcr | BCR_BLK_ARES);
+	delay(1);
+	gpu_wr(cc, GPUCC_GX_BCR, bcr & ~BCR_BLK_ARES);
+	gpu_wr(cc, GPUCC_GX_DOMAIN, dom | GX_DOMAIN_GMEM_RESET);
+	delay(1);
+	gpu_wr(cc, GPUCC_GX_DOMAIN, dom & ~GX_DOMAIN_GMEM_RESET);
+	gpu_wr(cc, GPUCC_GX_DOMAIN, dom & ~(GX_DOMAIN_GMEM_RESET | GX_DOMAIN_CLAMP_IO));
+	gpu_wr(cc, GPUCC_GX_GDSCR, v & ~GDSC_SW_COLLAPSE);
+	delay(1);       /* 8 XO cycles before the first status read */
+	bool ok = gpu_poll(cc, GPUCC_GX_GDSCR, GDSC_PWR_ON, GDSC_PWR_ON, GDSC_TIMEOUT_US);
+	uint32_t after = gpu_rd(cc, GPUCC_GX_GDSCR);
+	if (ok) {
+		delay(2);       /* clocks re-enable, staggered memory power-up */
+	} else {
+		gpu_wr(cc, GPUCC_GX_GDSCR, gpu_rd(cc, GPUCC_GX_GDSCR) | GDSC_SW_COLLAPSE);
+		delay(1);
+		gpu_wr(cc, GPUCC_GX_DOMAIN, gpu_rd(cc, GPUCC_GX_DOMAIN) | GX_DOMAIN_CLAMP_IO);
+	}
+	printf("SWEET GPU:   GX GDSC gdscr 0x%08x -> 0x%08x, domain 0x%08x -> 0x%08x, bcr 0x%08x: %s\n", v, after,
+	    dom, gpu_rd(cc, GPUCC_GX_DOMAIN), gpu_rd(cc, GPUCC_GX_BCR),
+	    ok ? "on" : "TIMEOUT; collapsed and clamped again");
+	return ok;
+}
+
+static const struct gpu_branch gpu_gx_branches[] = {
+	{ "gpu_cc_gx_cxo", GPUCC_GX_CXO_CBCR, true },
+	{ "gpu_cc_gx_gmu", GPUCC_GX_GMU_CBCR, true },
+	{ "gpu_cc_gx_gfx3d", GPUCC_GX_GFX3D_CBCR, false },
+	{ "gpu_cc_cx_gfx3d", GPUCC_CX_GFX3D_CBCR, false },
+};
+
+/* a6xx_sptprac_enable; upstream polls 100 us. */
+static bool
+gpu_sptprac_on(vm_offset_t gmu)
+{
+	uint32_t before = gmu_rd(gmu, REG_A6XX_GMU_SPTPRAC_PWR_CLK_STATUS);
+	gmu_wr(gmu, REG_A6XX_GMU_GX_SPTPRAC_POWER_CONTROL, SPTPRAC_POWER_ON);
+	bool ok = false;
+	for (unsigned i = 0; i < 500 && !ok; ++i) {
+		ok = (gmu_rd(gmu, REG_A6XX_GMU_SPTPRAC_PWR_CLK_STATUS) & SPTPRAC_ON_MASK) == SPTPRAC_ON_WANT;
+		if (!ok) {
+			delay(1);
+		}
+	}
+	printf("SWEET GPU:   SPTPRAC status 0x%08x -> 0x%08x: %s\n", before,
+	    gmu_rd(gmu, REG_A6XX_GMU_SPTPRAC_PWR_CLK_STATUS), ok ? "on" : "NOT ON");
+	return ok;
+}
+
+static uint64_t
+gpu_cp_alwayson(vm_offset_t gpu)
+{
+	const uint32_t lo_off = REG_A6XX_CP_ALWAYS_ON_COUNTER * 4u, hi_off = lo_off + 4u;
+	uint32_t hi = gpu_rd(gpu, hi_off), lo, hi2;
+	for (unsigned i = 0; i < 4; ++i) {
+		lo = gpu_rd(gpu, lo_off);
+		hi2 = gpu_rd(gpu, hi_off);
+		if (hi2 == hi) {
+			return (uint64_t)hi << 32 | lo;
+		}
+		hi = hi2;
+	}
+	return (uint64_t)hi << 32 | gpu_rd(gpu, lo_off);
+}
+
+static void
+gpu_stage2a(vm_offset_t cc, vm_offset_t gmu)
+{
+	printf("SWEET GPU: stage 2A (sweetgpu=%d): host-driven GX power at 180 MHz, then the first GX reads\n",
+	    gpu_level);
+	vm_offset_t gpu = ml_io_map(GPU_PA, GPU_REGS_SIZE);
+	if (!gpu) {
+		printf("SWEET GPU: stage 2A mapping failed\n");
+		return;
+	}
+	gpu_log_gx(cc, gmu, "before", false);
+	gpu_pause("RPMh ARC vote mx.lvl >= LOW_SVS (first GPU rail vote)");
+	if (!gpu_rail_vote("mx.lvl", RPMH_VLVL_LOW_SVS)) {
+		printf("SWEET GPU: stage 2A stopped: mx.lvl vote\n");
+		return;
+	}
+	gpu_pause("RPMh ARC vote gfx.lvl >= LOW_SVS (GX rail up)");
+	if (!gpu_rail_vote("gfx.lvl", RPMH_VLVL_LOW_SVS)) {
+		printf("SWEET GPU: stage 2A stopped: gfx.lvl vote\n");
+		return;
+	}
+	gpu_pause("PLL0 configure and lock at 360 MHz (gpucc 0x5090000)");
+	if (!gpu_pll0_360mhz(cc)) {
+		printf("SWEET GPU: stage 2A stopped: PLL0\n");
+		return;
+	}
+	gpu_pause("gfx3d RCG root on, then 180 MHz from PLL0 even (gpucc 0x509101c)");
+	if (!gpu_gfx3d_rcg_180mhz(cc)) {
+		gpu_log_gx(cc, gmu, "after RCG", false);
+		printf("SWEET GPU: stage 2A stopped: gfx3d RCG\n");
+		return;
+	}
+	gpu_pause("GX GDSC on: BCR and GMEM reset pulses, unclamp, un-collapse (gpucc 0x509100c)");
+	if (!gpu_gx_gdsc_on(cc)) {
+		gpu_log_gx(cc, gmu, "after GDSC", false);
+		printf("SWEET GPU: stage 2A stopped: GX GDSC (gfx.lvl vote may not reach the rail)\n");
+		return;
+	}
+	gpu_log_gx(cc, gmu, "with GX GDSC", true);
+	gpu_pause("GX branches: gx_cxo, gx_gmu, gx_gfx3d, cx_gfx3d");
+	bool clocks = true;
+	for (unsigned i = 0; i < sizeof(gpu_gx_branches) / sizeof(gpu_gx_branches[0]); ++i) {
+		clocks = gpu_branch_on(cc, &gpu_gx_branches[i]) && clocks;
+	}
+	if (!clocks) {
+		gpu_log_gx(cc, gmu, "after branches", true);
+		printf("SWEET GPU: stage 2A stopped: GX branches\n");
+		return;
+	}
+	gpu_pause("SPTP head switch on (GMU_GX_SPTPRAC_POWER_CONTROL)");
+	bool sptp = gpu_sptprac_on(gmu);
+	gpu_log_gx(cc, gmu, "after", true);
+	uint32_t sp =gmu_rd(gmu, REG_A6XX_GMU_SPTPRAC_PWR_CLK_STATUS);
+	if (sp & (A6XX_GMU_SPTPRAC_PWR_CLK_STATUS_GX_HM_GDSC_POWER_OFF__MASK |
+	    A6XX_GMU_SPTPRAC_PWR_CLK_STATUS_GX_HM_CLK_OFF__MASK)) {
+		printf("SWEET GPU: stage 2A stopped: the GMU sees GX %s (sptprac 0x%08x); no GX reads\n",
+		    (sp & A6XX_GMU_SPTPRAC_PWR_CLK_STATUS_GX_HM_GDSC_POWER_OFF__MASK) ? "power off" : "clock off", sp);
+		return;
+	}
+	gpu_pause("first GX read: RBBM_STATUS (0x5000840)");
+	printf("SWEET GPU:   RBBM_STATUS 0x%08x\n", gpu_rd(gpu, REG_A6XX_RBBM_STATUS * 4u));
+	printf("SWEET GPU:   RBBM_STATUS1 0x%08x STATUS2 0x%08x STATUS3 0x%08x CLOCK_CNTL 0x%08x\n",
+	    gpu_rd(gpu, REG_A6XX_RBBM_STATUS1 * 4u), gpu_rd(gpu, REG_A6XX_RBBM_STATUS2 * 4u),
+	    gpu_rd(gpu, REG_A6XX_RBBM_STATUS3 * 4u), gpu_rd(gpu, REG_A6XX_RBBM_CLOCK_CNTL * 4u));
+	gpu_pause("CP always-on counter (0x5002600) twice, 1 ms apart");
+	uint64_t c0 = gpu_cp_alwayson(gpu), g0 = gmu_alwayson(gmu);
+	delay(1000);
+	uint64_t c1 = gpu_cp_alwayson(gpu), g1 = gmu_alwayson(gmu);
+	printf("SWEET GPU:   CP always-on counter %llu -> %llu (+%llu); GMU counter +%llu in the same 1 ms\n",
+	    c0, c1, c1 - c0, g1 - g0);
+	uint32_t rbbm = gpu_rd(gpu, REG_A6XX_RBBM_STATUS * 4u);
+	printf("SWEET GPU: stage 2A %s: GX reads work, RBBM_STATUS 0x%08x (%s), CP counter %s, SPTP %s; GX stays on\n",
+	    c1 > c0 && !(rbbm & A6XX_RBBM_STATUS_GPU_BUSY_IGN_AHB__MASK) ? "PASSED" : "done with findings", rbbm,
+	    (rbbm & A6XX_RBBM_STATUS_GPU_BUSY_IGN_AHB__MASK) ? "busy" : "idle", c1 > c0 ? "runs" : "STOPPED",
+	    sptp ? "on" : "NOT on");
 }
 
 static void
@@ -566,8 +901,8 @@ gpu_thread(void *arg, wait_result_t result)
 	}
 	printf("SWEET GPU: stage 0 (sweetgpu=%d): firmware blobs, cmd-db, speed bin; no GPU registers\n",
 	    gpu_level);
-	if (gpu_level > 2) {
-		printf("SWEET GPU: stages above 1 are not built yet; running stages 0 and 1\n");
+	if (gpu_level > 3) {
+		printf("SWEET GPU: stages above 2A are not built yet; running stages 0 to 2A\n");
 	}
 	unsigned found = gpu_find_blobs();
 	gpu_check_blobs();
@@ -575,8 +910,9 @@ gpu_thread(void *arg, wait_result_t result)
 	gpu_cmddb();
 	gpu_speed_bin();
 	printf("SWEET GPU: stage 0 done\n");
-	if (gpu_level >= 2) {
-		gpu_stage1();
+	vm_offset_t cc = 0, gmu = 0;
+	if (gpu_level >= 2 && gpu_stage1(&cc, &gmu) && gpu_level >= 3) {
+		gpu_stage2a(cc, gmu);
 	}
 	if (gpu_hang == 1) {
 		gpu_pause("deliberate hang (sweetgpuhang=1): interrupts off, spinning; pull the log from recovery");

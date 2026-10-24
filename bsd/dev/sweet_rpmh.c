@@ -2,6 +2,8 @@
  * SWEET PM6150L L11C bring-up; see report.md for DT and source evidence.
  * Sole XNU apps-DRV owner, called from thread context with deep idle disabled.
  * No sleep/wake programming, SPMI writes, GIC handler, or timeout recovery.
+ * GPU stage 2A (sweet_gpu.c) adds one-command ARC level votes for gfx.lvl
+ * and mx.lvl through the same ACTIVE TCS path and the same safety rules.
  */
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 #include <sys/param.h>
@@ -12,6 +14,7 @@
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+int sweet_rpmh_arc_vote(const char *res, unsigned vlvl, unsigned *hlvl);
 int sweet_rpmh_cmddb_dump(void);
 
 /* Live downstream DT has two positional reg entries, no reg-names. */
@@ -48,7 +51,13 @@ int sweet_rpmh_cmddb_dump(void);
 #define RH_VRM          4u
 #define RH_BCM          5u
 #define RH_ARC_LEVELS   16u      /* Linux rpmhpd RPMH_ARC_MAX_LEVELS */
+#define RH_ARC_VLVL_MAX 64u      /* RPMh LOW_SVS: stage 2A votes only the lowest active corner */
+#define RH_CMDS_MAX     3u
 #define RH_TIMEOUT_US   100000u
+
+struct rh_cmd {
+	uint32_t addr, data;
+};
 
 static vm_offset_t rh_rsc, rh_tcs, rh_dict, rh_db;
 static uint32_t rh_db_size;
@@ -162,8 +171,9 @@ rh_map(void)
 	return 0;
 }
 
+/* want is RH_VRM or RH_ARC; aux_off/aux_len (optional) locate the entry's aux data. */
 static int
-rh_lookup(const char *res, uint32_t *address)
+rh_lookup(const char *res, unsigned want, uint32_t *address, uint32_t *aux_off, unsigned *aux_len)
 {
 	uint32_t key[2] = {0, 0};
 	for (unsigned i = 0; i < 8 && res[i]; ++i) {
@@ -190,12 +200,17 @@ rh_lookup(const char *res, uint32_t *address)
 				continue;
 			}
 			uint32_t addr = rh_read(rh_db, e + 16);
-			if (slave != RH_VRM || (addr >> 16) != RH_VRM || (addr & 15u) ||
-			    !rh_range(aux + rh_db16(e + 22), rh_db16(e + 20))) {
-				printf("SWEET RPMH: invalid VRM entry for %s\n", res);
+			uint32_t off = aux + rh_db16(e + 22);
+			unsigned len = rh_db16(e + 20);
+			if (slave != want || (addr >> 16) != want || (addr & 15u) || !rh_range(off, len)) {
+				printf("SWEET RPMH: invalid %s entry for %s\n", want == RH_ARC ? "ARC" : "VRM", res);
 				return EINVAL;
 			}
 			*address = addr;
+			if (aux_off) {
+				*aux_off = off;
+				*aux_len = len;
+			}
 			++matches;
 			printf("SWEET RPMH: %s addr=%#x slave=%u aux-version=%#x priority=%#x:%#x\n",
 			    res, addr, slave, rh_db16(h + 8),
@@ -222,9 +237,14 @@ rh_free(unsigned t)
 	    !(rh_read(rh_tcs, RH_IRQ_STATUS) & (1u << t));
 }
 
+/* One ACTIVE request of n commands to one resource (cmds[0].addr is its base). */
 static int
-rh_send(uint32_t address, unsigned mv)
+rh_send(const struct rh_cmd *cmds, unsigned n, const char *what)
 {
+	if (n == 0 || n > RH_CMDS_MAX || n > rh_ncpt) {
+		return EINVAL;
+	}
+	uint32_t address = cmds[0].addr & ~15u, mask = (1u << n) - 1u;
 	int chosen = -1;
 	for (unsigned t = 0; t < RH_ACTIVE_N; ++t) {
 		uint32_t b = t * RH_TCS_STRIDE;
@@ -238,7 +258,7 @@ rh_send(uint32_t address, unsigned mv)
 		for (unsigned c = 0; c < rh_ncpt; ++c) {
 			if ((enabled & (1u << c)) &&
 			    (rh_read(rh_tcs, b + RH_ADDR + c * RH_CMD_STRIDE) & ~15u) == address) {
-				printf("SWEET RPMH: conflicting inherited L11C request in TCS%u\n", t);
+				printf("SWEET RPMH: conflicting inherited %s request in TCS%u\n", what, t);
 				return EBUSY;
 			}
 		}
@@ -270,30 +290,28 @@ rh_send(uint32_t address, unsigned mv)
 	}
 	/* From here an uncertain write/timeout quarantines our slot for this boot. */
 	rh_poisoned = true;
-	/* HPM (raw 7) is supported by this PMIC5 LDO; enable comes last. */
-	const uint32_t offsets[3] = {0, 8, 4};
-	const uint32_t values[3] = {mv, 7, 1};
-	printf("SWEET RPMH: TCS%u ACTIVE %u mV mode=7 enable=1 irq-enable=%#x\n", t, mv, irq_en);
-	for (unsigned c = 0; c < 3; ++c) {
+	printf("SWEET RPMH: TCS%u ACTIVE %s, %u command(s), irq-enable=%#x\n", t, what, n, irq_en);
+	for (unsigned c = 0; c < n; ++c) {
 		uint32_t cmd = b + c * RH_CMD_STRIDE;
+		printf("SWEET RPMH:   cmd%u addr=%#x data=%#x\n", c, cmds[c].addr, cmds[c].data);
 		if (!rh_sync(cmd + RH_MSGID, RH_WRITE_ACK) ||
-		    !rh_sync(cmd + RH_ADDR, address + offsets[c]) ||
-		    !rh_sync(cmd + RH_DATA, values[c])) {
+		    !rh_sync(cmd + RH_ADDR, cmds[c].addr) ||
+		    !rh_sync(cmd + RH_DATA, cmds[c].data)) {
 			return EIO;
 		}
 	}
-	if (!rh_sync(b + RH_WAIT, 7) || !rh_sync(b + RH_ENABLE, 7) ||
+	if (!rh_sync(b + RH_WAIT, mask) || !rh_sync(b + RH_ENABLE, mask) ||
 	    !rh_sync(b + RH_CONTROL, 0) || !rh_sync(b + RH_CONTROL, RH_AMC_EN)) {
 		return EIO;
 	}
 	rh_write(rh_tcs, b + RH_CONTROL, RH_AMC_EN | RH_TRIGGER);
-	uint32_t irq = 0, idle = 0, status[3] = {0, 0, 0};
+	uint32_t irq = 0, idle = 0, status[RH_CMDS_MAX] = {0, 0, 0};
 	bool done = false, progress = false;
 	for (unsigned us = 0; us < RH_TIMEOUT_US; ++us) {
 		irq = rh_read(rh_tcs, RH_IRQ_STATUS);
 		idle = rh_read(rh_tcs, b + RH_STATUS);
 		bool complete = true;
-		for (unsigned c = 0; c < 3; ++c) {
+		for (unsigned c = 0; c < n; ++c) {
 			status[c] = rh_read(rh_tcs, b + RH_CMD_STATUS + c * RH_CMD_STRIDE);
 			complete &= status[c] != 0xffffffffu &&
 			    (status[c] & (RH_ISSUED | RH_COMPLETE)) == (RH_ISSUED | RH_COMPLETE);
@@ -324,7 +342,7 @@ rh_send(uint32_t address, unsigned mv)
 		return EIO;
 	}
 	rh_poisoned = false;
-	printf("SWEET RPMH: L11C ACTIVE vote complete (rail voltage requires hardware verification)\n");
+	printf("SWEET RPMH: %s ACTIVE vote complete (rail voltage requires hardware verification)\n", what);
 	return 0;
 }
 
@@ -347,14 +365,83 @@ sweet_rpmh_vreg_enable(const char *res, unsigned mv)
 	}
 	error = rh_map();
 	if (!error) {
-		error = rh_lookup(res, &address);
+		error = rh_lookup(res, RH_VRM, &address, NULL, NULL);
 	}
 	if (!error) {
-		error = rh_send(address, mv);
+		/* HPM (raw 7) is supported by this PMIC5 LDO; enable comes last. */
+		const struct rh_cmd cmds[3] = {
+			{ address + 0, mv }, { address + 8, 7 }, { address + 4, 1 },
+		};
+		error = rh_send(cmds, 3, "L11C");
 	}
 out:
 	if (error) {
 		printf("SWEET RPMH: enable failed errno=%d\n", error);
+	}
+	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
+	return error;
+}
+
+/*
+ * ARC level for a requested vlvl, as Linux rpmhpd maps a corner: the first
+ * hlvl whose vlvl is >= the request. The aux table must rise strictly.
+ */
+static int
+rh_arc_level(const char *res, uint32_t off, unsigned len, unsigned vlvl, unsigned *hlvl)
+{
+	unsigned prev = 0;
+	for (unsigned i = 0; !(off & 1u) && i < len / 2u && i < RH_ARC_LEVELS; ++i) {
+		unsigned v = rh_db16(off + 2u * i);
+		if (i && v <= prev) {
+			break;
+		}
+		if (v >= vlvl) {
+			printf("SWEET RPMH: %s vlvl %u -> hlvl %u (vlvl %u)\n", res, vlvl, i, v);
+			*hlvl = i;
+			return 0;
+		}
+		prev = v;
+	}
+	printf("SWEET RPMH: %s has no level >= vlvl %u; refusing\n", res, vlvl);
+	return EINVAL;
+}
+
+int
+sweet_rpmh_arc_vote(const char *res, unsigned vlvl, unsigned *hlvl)
+{
+	/* GPU rails only, at the lowest active corner: a wrong vote cannot over-volt. */
+	if (!res || (strcmp(res, "gfx.lvl") && strcmp(res, "mx.lvl")) || vlvl == 0 ||
+	    vlvl > RH_ARC_VLVL_MAX) {
+		printf("SWEET RPMH: expected gfx.lvl or mx.lvl and vlvl 1..%u\n", RH_ARC_VLVL_MAX);
+		return EINVAL;
+	}
+	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
+		return EBUSY;
+	}
+	int error = EIO;
+	uint32_t address = 0, aux = 0;
+	unsigned len = 0, level = 0;
+	if (rh_poisoned) {
+		printf("SWEET RPMH: previous uncertain transaction; refusing further access\n");
+		goto out;
+	}
+	error = rh_map();
+	if (!error) {
+		error = rh_lookup(res, RH_ARC, &address, &aux, &len);
+	}
+	if (!error) {
+		error = rh_arc_level(res, aux, len, vlvl, &level);
+	}
+	if (!error) {
+		const struct rh_cmd cmd = { address, level };
+		error = rh_send(&cmd, 1, res);
+	}
+	if (!error && hlvl) {
+		*hlvl = level;
+	}
+out:
+	if (error) {
+		printf("SWEET RPMH: %s vote failed errno=%d\n", res, error);
 	}
 	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
 	return error;
