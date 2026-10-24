@@ -12,6 +12,7 @@
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+int sweet_rpmh_cmddb_dump(void);
 
 /* Live downstream DT has two positional reg entries, no reg-names. */
 #define RH_RSC_PA       0x18220000u
@@ -43,7 +44,10 @@ int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
 #define RH_DB_HEADER    144u
 #define RH_DB_ENTRY     24u
 #define RH_DB_MAX       0x100000u /* policy bound, not a DT size */
+#define RH_ARC          3u
 #define RH_VRM          4u
+#define RH_BCM          5u
+#define RH_ARC_LEVELS   16u      /* Linux rpmhpd RPMH_ARC_MAX_LEVELS */
 #define RH_TIMEOUT_US   100000u
 
 static vm_offset_t rh_rsc, rh_tcs, rh_dict, rh_db;
@@ -351,6 +355,109 @@ sweet_rpmh_vreg_enable(const char *res, unsigned mv)
 out:
 	if (error) {
 		printf("SWEET RPMH: enable failed errno=%d\n", error);
+	}
+	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
+	return error;
+}
+
+/*
+ * Read-only cmd-db listing for the GPU port (sweet_gpu.c): every ARC
+ * resource with its level table (aux = u16 vlvl per hlvl, as rpmhpd reads
+ * it), every BCM with its aux {le32 unit, le16 width, u8 vcd}, and the VRM
+ * names on summary lines. Touches only the cmd-db RAM and the RSC id
+ * registers rh_map() always reads; no TCS is written.
+ */
+static void
+rh_entry_id(uint32_t e, char id[9])
+{
+	uint32_t w[2] = { rh_read(rh_db, e), rh_read(rh_db, e + 4) };
+	for (unsigned i = 0; i < 8; ++i) {
+		char c = (char)(w[i / 4] >> (8u * (i % 4)));
+		id[i] = (c >= 0x20 && c < 0x7f) ? c : (c ? '?' : '\0');
+	}
+	id[8] = '\0';
+}
+
+static void
+rh_dump_entry(unsigned slave, uint32_t e, uint32_t aux)
+{
+	char id[9];
+	rh_entry_id(e, id);
+	uint32_t addr = rh_read(rh_db, e + 16);
+	uint32_t len = rh_db16(e + 20), off = aux + rh_db16(e + 22);
+	if (len && (!rh_range(off, len) || (off & 1u))) {
+		printf("SWEET RPMH:   %-8s addr=%#x aux len %u at %#x out of range\n", id, addr, len, off);
+		return;
+	}
+	if (slave == RH_ARC) {
+		char line[128];
+		int n = snprintf(line, sizeof(line), "SWEET RPMH:   ARC %-8s addr=%#x levels:", id, addr);
+		for (unsigned i = 0; i < len / 2u && i < RH_ARC_LEVELS && n > 0 && (size_t)n < sizeof(line); ++i) {
+			unsigned vlvl = rh_db16(off + 2u * i);
+			if (i && !vlvl) {
+				break;
+			}
+			n += snprintf(line + n, sizeof(line) - (size_t)n, " %u", vlvl);
+		}
+		printf("%s\n", line);
+	} else if (slave == RH_BCM) {
+		if (len < 8) {
+			printf("SWEET RPMH:   BCM %-8s addr=%#x aux len %u\n", id, addr, len);
+			return;
+		}
+		uint32_t unit = rh_db16(off) | (uint32_t)rh_db16(off + 2) << 16;
+		printf("SWEET RPMH:   BCM %-8s addr=%#x unit=%u width=%u vcd=%u\n",
+		    id, addr, unit, rh_db16(off + 4), rh_db16(off + 6) & 0xffu);
+	}
+}
+
+int
+sweet_rpmh_cmddb_dump(void)
+{
+	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
+		return EBUSY;
+	}
+	int error = rh_map();
+	for (unsigned i = 0; !error && i < 8; ++i) {
+		uint32_t h = 8u + 16u * i;
+		unsigned slave = rh_db16(h);
+		if (!slave) {
+			break;
+		}
+		uint32_t entries = RH_DB_HEADER + rh_db16(h + 2);
+		uint32_t aux = RH_DB_HEADER + rh_db16(h + 4);
+		unsigned count = rh_db16(h + 6);
+		if (slave < RH_ARC || slave > RH_BCM || (entries & 3u) ||
+		    !rh_range(entries, count * RH_DB_ENTRY) || !rh_range(aux, 0)) {
+			printf("SWEET RPMH: malformed cmd-db slave header %u\n", i);
+			error = EINVAL;
+			break;
+		}
+		printf("SWEET RPMH: cmd-db slave %u (%s) version=%#x entries=%u\n", slave,
+		    slave == RH_ARC ? "ARC" : slave == RH_VRM ? "VRM" : "BCM", rh_db16(h + 8), count);
+		if (slave != RH_VRM) {
+			for (unsigned j = 0; j < count; ++j) {
+				rh_dump_entry(slave, entries + RH_DB_ENTRY * j, aux);
+			}
+			continue;
+		}
+		/* VRM: names only, six to a line (each up to " ldoa10@0x3f000"). */
+		char line[160];
+		int n = 0;
+		for (unsigned j = 0; j < count; ++j) {
+			uint32_t e = entries + RH_DB_ENTRY * j;
+			char id[9];
+			rh_entry_id(e, id);
+			if (j % 6 == 0) {
+				n = snprintf(line, sizeof(line), "SWEET RPMH:   VRM");
+			}
+			if (n > 0 && (size_t)n < sizeof(line)) {
+				n += snprintf(line + n, sizeof(line) - (size_t)n, " %s@%#x", id, rh_read(rh_db, e + 16));
+			}
+			if (j % 6 == 5 || j + 1 == count) {
+				printf("%s\n", line);
+			}
+		}
 	}
 	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
 	return error;

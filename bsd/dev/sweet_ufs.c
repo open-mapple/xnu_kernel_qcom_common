@@ -53,6 +53,7 @@ extern void sweet_sample_start(void);
 extern void sweet_keys_init(void);
 extern void sweet_touch_init(void);
 extern void sweet_cpufreq_init(void);
+extern void sweet_gpu_init(void);
 extern void sweet_usb_probe(void);
 
 #define REG_CAP         0x00
@@ -677,6 +678,7 @@ sweet_ufs_init(void)
 	sweet_keys_init();
 	sweet_touch_init();
 	sweet_cpufreq_init();
+	sweet_gpu_init();
 	sweet_usb_probe();
 	return 0;
 }
