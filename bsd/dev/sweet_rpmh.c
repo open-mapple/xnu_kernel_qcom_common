@@ -16,6 +16,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
 int sweet_rpmh_arc_vote(const char *res, unsigned vlvl, unsigned *hlvl);
 int sweet_rpmh_cmddb_dump(void);
+int sweet_rpmh_cmddb_query(const char *res, unsigned slave, uint32_t *addr, unsigned *vlvl, unsigned nmax, unsigned *n);
 
 /* Live downstream DT has two positional reg entries, no reg-names. */
 #define RH_RSC_PA       0x18220000u
@@ -171,7 +172,7 @@ rh_map(void)
 	return 0;
 }
 
-/* want is RH_VRM or RH_ARC; aux_off/aux_len (optional) locate the entry's aux data. */
+/* want is RH_VRM, RH_ARC or RH_BCM; aux_off/aux_len (optional) locate the entry's aux data. */
 static int
 rh_lookup(const char *res, unsigned want, uint32_t *address, uint32_t *aux_off, unsigned *aux_len)
 {
@@ -202,8 +203,11 @@ rh_lookup(const char *res, unsigned want, uint32_t *address, uint32_t *aux_off, 
 			uint32_t addr = rh_read(rh_db, e + 16);
 			uint32_t off = aux + rh_db16(e + 22);
 			unsigned len = rh_db16(e + 20);
-			if (slave != want || (addr >> 16) != want || (addr & 15u) || !rh_range(off, len)) {
-				printf("SWEET RPMH: invalid %s entry for %s\n", want == RH_ARC ? "ARC" : "VRM", res);
+			/* BCM addresses are 4 apart (CN0 0x500a8); ARC and VRM 16. */
+			if (slave != want || (addr >> 16) != want || (addr & (want == RH_BCM ? 3u : 15u)) ||
+			    !rh_range(off, len)) {
+				printf("SWEET RPMH: invalid %s entry for %s\n",
+				    want == RH_ARC ? "ARC" : want == RH_BCM ? "BCM" : "VRM", res);
 				return EINVAL;
 			}
 			*address = addr;
@@ -442,6 +446,49 @@ sweet_rpmh_arc_vote(const char *res, unsigned vlvl, unsigned *hlvl)
 out:
 	if (error) {
 		printf("SWEET RPMH: %s vote failed errno=%d\n", res, error);
+	}
+	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
+	return error;
+}
+
+/*
+ * cmd-db lookup for the GMU tables (sweet_gmu.c): the address of an ARC
+ * (slave 3) or BCM (slave 5) resource, and for an ARC with vlvl set its
+ * level table, vlvl[hlvl], up to the first level that does not rise.
+ * Read-only: no TCS is touched.
+ */
+int
+sweet_rpmh_cmddb_query(const char *res, unsigned slave, uint32_t *addr, unsigned *vlvl, unsigned nmax, unsigned *n)
+{
+	if (!res || !addr || (slave != RH_ARC && slave != RH_BCM) || (vlvl && (slave != RH_ARC || !n))) {
+		return EINVAL;
+	}
+	if (__atomic_exchange_n(&rh_lock, 1, __ATOMIC_ACQUIRE)) {
+		return EBUSY;
+	}
+	uint32_t address = 0, aux = 0;
+	unsigned len = 0, count = 0;
+	int error = rh_map();
+	if (!error) {
+		error = rh_lookup(res, slave, &address, &aux, &len);
+	}
+	for (unsigned i = 0; !error && vlvl && !(aux & 1u) && i < len / 2u && i < RH_ARC_LEVELS && i < nmax; ++i) {
+		unsigned v = rh_db16(aux + 2u * i);
+		if (i && v <= vlvl[i - 1u]) {
+			break;
+		}
+		vlvl[i] = v;
+		count = i + 1u;
+	}
+	if (!error && vlvl && !count) {
+		printf("SWEET RPMH: %s has no level table\n", res);
+		error = EINVAL;
+	}
+	if (!error) {
+		*addr = address;
+		if (n) {
+			*n = count;
+		}
 	}
 	__atomic_store_n(&rh_lock, 0, __ATOMIC_RELEASE);
 	return error;

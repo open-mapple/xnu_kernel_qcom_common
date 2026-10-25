@@ -1,5 +1,5 @@
 /*
- * SM7150 Adreno 618 bring-up (docs/GPU_A618_PLAN.md), stages 0, 1 and 2A.
+ * SM7150 Adreno 618 bring-up (docs/GPU_A618_PLAN.md), stages 0, 1, 2A and 2B.
  *
  * Boot-arg sweetgpu=N (N >= 1) starts a thread sweetgpudelay seconds after
  * boot (default 40, so the home screen is up first). Stage 0 (N >= 1) only
@@ -58,6 +58,21 @@
  *    counter when cx_gmu reads near 200 MHz, else by the root status bit)
  *    and the GMU sees the GX head switch and its clock on: RBBM_STATUS,
  *    RBBM_CLOCK_CNTL and the CP always-on counter, the first GX reads.
+ * 2A showed that gx_gfx3d never runs when the host drives GX. Stage 2B
+ * (sweetgpu=4, instead of 2A) lets the GMU firmware do it, as kgsl does
+ * (sweet_gmu.c, sweet_smmu.c). It needs speed bin 146 (its perf table) and
+ * the GPU-GMU and GPU-GMU-MEM blobs. sweetgmu=N (default 0) stops after step
+ * 2B.N; sweetgmursc=1 adds mainline's RSCC start handshake before the CM3
+ * starts:
+ *  2B.0 survey of the GPU SMMU, GMU, RSCC and PDC; nothing written
+ *  2B.1 GMU memory (GPU-GMU-MEM, uncached) and an SMMU bank for its streams
+ *  2B.2 RSCC and PDC microcode
+ *  2B.3 firmware into the TCMs, boot registers, CM3 start
+ *  2B.4 GX rail through the GMU (OOB boot_slumber), SPTPRAC, then the GX
+ *       GDSC, gfx3d RCG and the clock counter, read only
+ *  2B.5 HFI queues and messages
+ *  2B.6 OOB_GPU and a DCVS vote, the clock counter again, the first GX reads
+ *       if gx_gfx3d runs, then a minute of GMU status every 10 s
  * GMU and cx_misc offsets come from the generated sweet_gpu_regs.h; GCC and
  * gpucc offsets from the downstream drivers above. Everything stays on after
  * the last stage that runs.
@@ -79,6 +94,7 @@
 #include <pexpert/pexpert.h>
 #include <pexpert/device_tree.h>
 #include "sweet_gpu_regs.h"
+#include "sweet_gpu_internal.h"
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern int sweet_rpmh_cmddb_dump(void);
@@ -88,7 +104,9 @@ void sweet_gpu_init(void);
 #define SWEET_GPU_DELAY_S       40u
 #define SWEET_GPU_PAUSE_MS      2000u
 #define GPU_BLOB_MAX            0x100000u
-#define GPU_GMU_ITCM_SIZE       0x8000u
+#define GPU_GMU_TCM_SIZE        0x8000u         /* 16 KiB ITCM code, then 16 KiB DTCM data */
+#define GPU_GMU_MEM_SIZE        0x100000u
+#define GPU_BIN_2B              146u            /* the perf table sweet_gmu.c sends */
 #define QFPROM_PA               0x780000u
 #define QFPROM_GPU_SPEED_BIN    0x41a0u
 #define GPU_SPEED_BIN_MASK      0x1fe00000u
@@ -120,10 +138,7 @@ void sweet_gpu_init(void);
 #define GPUCC_GMU_RCG           0x1120u         /* +0 CMD, +4 CFG */
 #define GPUCC_GX_DOMAIN         0x1508u         /* bit 0: GX clamp_io */
 #define GPUCC_CX_GDS_HW_CTRL    0x1540u         /* hw-ctrl-addr: CX GDSC status */
-/* GMU and cx_misc (sdmmagpie-gpu.dtsi); sweet_gpu_regs.h offsets are dwords from GPU_PA */
-#define GPU_PA                  0x05000000u
-#define GMU_PA                  0x0506a000u
-#define GMU_SIZE                0x31000u
+/* cx_misc (sdmmagpie-gpu.dtsi); GPU_PA and GMU_PA are in sweet_gpu_internal.h */
 #define CX_MISC_PA              0x0509e000u
 #define CX_MISC_SIZE            0x1000u
 
@@ -209,10 +224,10 @@ void sweet_gpu_init(void);
 #define MEAS_XO_DIV4_HZ         4800000u
 #define MEAS_FAILED             0xffffffffu
 
-enum { BLOB_SQE, BLOB_GMU, BLOB_ZAP_MDT, BLOB_ZAP_B02, BLOB_COUNT };
+enum { BLOB_SQE, BLOB_GMU, BLOB_ZAP_MDT, BLOB_ZAP_B02, BLOB_GMU_MEM, BLOB_COUNT };
 
 static const char *const gpu_blob_names[BLOB_COUNT] = {
-	"GPU-SQE", "GPU-GMU", "GPU-ZAP-MDT", "GPU-ZAP-B02",
+	"GPU-SQE", "GPU-GMU", "GPU-ZAP-MDT", "GPU-ZAP-B02", "GPU-GMU-MEM",
 };
 
 static struct {
@@ -221,11 +236,11 @@ static struct {
 	const uint8_t *va;
 } gpu_blobs[BLOB_COUNT];
 
-static int gpu_level, gpu_hang;
+static int gpu_level, gpu_hang, gpu_gmu_stop, gpu_gmu_rsc;
 static uint32_t gpu_delay_s = SWEET_GPU_DELAY_S;
 static int gpu_sleep_chan;
 
-static void
+void
 gpu_sleep_ms(unsigned ms)
 {
 	uint64_t deadline;
@@ -235,40 +250,11 @@ gpu_sleep_ms(unsigned ms)
 }
 
 /* Log what comes next, then give the persistent log time to reach the disk. */
-static void
+void
 gpu_pause(const char *next)
 {
 	printf("SWEET GPU: next: %s (in %u ms)\n", next, SWEET_GPU_PAUSE_MS);
 	gpu_sleep_ms(SWEET_GPU_PAUSE_MS);
-}
-
-static uint32_t
-gpu_rd(vm_offset_t base, uint32_t off)
-{
-	uint32_t v = *(volatile uint32_t *)(base + off);
-	__asm__ volatile("dmb oshld" ::: "memory");
-	return v;
-}
-
-static void
-gpu_wr(vm_offset_t base, uint32_t off, uint32_t val)
-{
-	__asm__ volatile("dmb oshst" ::: "memory");
-	*(volatile uint32_t *)(base + off) = val;
-	__asm__ volatile("dsb osh" ::: "memory");
-}
-
-/* Poll every 1 us until (reg & mask) == want; false after us tries. */
-static bool
-gpu_poll(vm_offset_t base, uint32_t off, uint32_t mask, uint32_t want, unsigned us)
-{
-	for (unsigned i = 0; i < us; ++i) {
-		if ((gpu_rd(base, off) & mask) == want) {
-			return true;
-		}
-		delay(1);
-	}
-	return (gpu_rd(base, off) & mask) == want;
 }
 
 /* Blob bytes are in RAM; read words without assuming alignment. */
@@ -353,9 +339,13 @@ gpu_check_blobs(void)
 	}
 	if ((p = gpu_blobs[BLOB_GMU].va)) {
 		len = gpu_blobs[BLOB_GMU].len;
-		/* Legacy (a618) image: the whole file goes to the CM3 ITCM; vector table first. */
+		/*
+		 * Legacy (a618) image, no header: 16 KiB of CM3 code (vector table
+		 * first) for the ITCM, then 16 KiB of DTCM data, which follows the
+		 * ITCM in the host window. One 32 KiB write fills both.
+		 */
 		uint32_t sp = len >= 8 ? blob32(p) : 0, reset = len >= 8 ? blob32(p + 4) : 0;
-		bool ok = len >= 8 && len <= GPU_GMU_ITCM_SIZE && !(len & 3u) && (reset & 1u) && reset < len;
+		bool ok = len == GPU_GMU_TCM_SIZE && (reset & 1u) && reset < len / 2u;
 		printf("SWEET GPU: GMU %s: %u bytes, initial sp %#x, reset vector %#x\n",
 		    ok ? "ok" : "BAD", len, sp, reset);
 	}
@@ -381,21 +371,33 @@ gpu_check_blobs(void)
 		    gpu_blobs[BLOB_ZAP_B02].len == load_filesz ? "ok" : "BAD",
 		    gpu_blobs[BLOB_ZAP_B02].len, load_filesz);
 	}
+	if ((p = gpu_blobs[BLOB_GMU_MEM].va)) {
+		/* Zeros from mkboot.sh; stage 2B maps it for the GMU. */
+		len = gpu_blobs[BLOB_GMU_MEM].len;
+		uint32_t nonzero = 0;
+		for (uint32_t i = 0; i < len; ++i) {
+			nonzero += p[i] != 0;
+		}
+		printf("SWEET GPU: GMU-MEM %s: %u bytes, %u non-zero\n", len == GPU_GMU_MEM_SIZE && !nonzero ? "ok" : "BAD",
+		    len, nonzero);
+	}
 }
 
-static void
+/* The bin, or -1 if QFPROM could not be read. */
+static int
 gpu_speed_bin(void)
 {
 	gpu_pause("QFPROM speed-bin read at 0x7841a0");
 	vm_offset_t q = ml_io_map(QFPROM_PA + QFPROM_GPU_SPEED_BIN, 4);
 	if (!q) {
 		printf("SWEET GPU: QFPROM mapping failed\n");
-		return;
+		return -1;
 	}
 	uint32_t raw = gpu_rd(q, 0);
 	unsigned bin = (raw & GPU_SPEED_BIN_MASK) >> GPU_SPEED_BIN_SHIFT;
 	printf("SWEET GPU: speed bin raw=%#x bin=%u -> %s fmax %u MHz\n", raw, bin,
 	    bin ? "table" : "default table,", bin ? bin * 48u / 10u : 825u);
+	return (int)bin;
 }
 
 static void
@@ -536,18 +538,6 @@ gpu_cc_on(vm_offset_t cc)
 	return ok;
 }
 
-/* reg is a dword offset from GPU_PA, as in sweet_gpu_regs.h. */
-static uint32_t
-gmu_rd(vm_offset_t gmu, uint32_t reg)
-{
-	uint32_t off = reg * 4u - (GMU_PA - GPU_PA);
-	if (reg * 4u < GMU_PA - GPU_PA || off >= GMU_SIZE) {
-		printf("SWEET GPU: register %#x is outside the GMU block\n", reg);
-		return 0xffffffffu;
-	}
-	return gpu_rd(gmu, off);
-}
-
 static uint64_t
 gmu_alwayson(vm_offset_t gmu)
 {
@@ -654,17 +644,6 @@ gpu_stage1(vm_offset_t *gccp, vm_offset_t *ccp, vm_offset_t *gmup)
 	*ccp = cc;
 	*gmup = gmu;
 	return true;
-}
-
-static void
-gmu_wr(vm_offset_t gmu, uint32_t reg, uint32_t val)
-{
-	uint32_t off = reg * 4u - (GMU_PA - GPU_PA);
-	if (reg * 4u < GMU_PA - GPU_PA || off >= GMU_SIZE) {
-		printf("SWEET GPU: register %#x is outside the GMU block; not written\n", reg);
-		return;
-	}
-	gpu_wr(gmu, off, val);
 }
 
 /* The cmd-db dump or a touch-rail vote may hold the RPMh lock briefly. */
@@ -1028,6 +1007,116 @@ gpu_stage2a(vm_offset_t gcc, vm_offset_t cc, vm_offset_t gmu)
 	    sptp ? "on" : "NOT on");
 }
 
+/*
+ * GX as the GMU left it, read only: GDSC, gfx3d RCG, SPTPRAC, then the clock
+ * counter (the gx_* clocks only with the GX GDSC on). True if the GDSC is on
+ * and gx_gfx3d runs at any rate.
+ */
+static bool
+gpu_gx_check(vm_offset_t gcc, vm_offset_t cc, vm_offset_t gmu, const char *when)
+{
+	bool gdsc = (gpu_rd(cc, GPUCC_GX_GDSCR) & GDSC_PWR_ON) != 0;
+	gpu_log_gx(cc, gmu, when, gdsc);
+	uint32_t khz[MEAS_ALL] = { 0 };
+	gpu_pause(gdsc ? "clock counter (GCC 0x162000): cx_gmu, gx_gfx3d, cx_gfx3d, gx_cxo, gx_gmu" :
+	    "clock counter (GCC 0x162000): cx_gmu only, GX GDSC off");
+	gpu_measure(gcc, cc, gdsc ? MEAS_ALL : 1u, when, khz);
+	bool counter = khz[0] >= 150000u && khz[0] <= 250000u;
+	bool runs = gdsc && khz[1] != MEAS_FAILED && khz[1] != 0;
+	printf("SWEET GPU: %s: GX GDSC %s, gx_gfx3d %s (%u kHz), counter %s\n", when, gdsc ? "on" : "OFF",
+	    runs ? "runs" : "does not run", runs ? khz[1] : 0, counter ? "trusted (cx_gmu near 200 MHz)" : "NOT trusted");
+	return runs;
+}
+
+/* Not in sweet_gpu_regs.h; dword offsets from GPU_PA (a6xx.xml) */
+#define REG_A6XX_RBBM_INT_0_STATUS      0x00201u
+#define REG_A6XX_GBIF_HALT              0x03c45u
+
+/* With GX on and gx_gfx3d running: the first GX reads. GBIF_HALT is only read. */
+static void
+gpu_gx_reads(vm_offset_t gpu, vm_offset_t gmu)
+{
+	gpu_pause("first GX reads: RBBM_STATUS (0x5000840), RBBM_INT_0_STATUS, GBIF_HALT");
+	uint32_t rbbm = gpu_rd(gpu, REG_A6XX_RBBM_STATUS * 4u);
+	printf("SWEET GPU:   RBBM_STATUS 0x%08x RBBM_INT_0_STATUS 0x%08x GBIF_HALT 0x%08x\n", rbbm,
+	    gpu_rd(gpu, REG_A6XX_RBBM_INT_0_STATUS * 4u), gpu_rd(gpu, REG_A6XX_GBIF_HALT * 4u));
+	gpu_pause("CP always-on counter (0x5002600) twice, 1 ms apart");
+	uint64_t c0 = gpu_cp_alwayson(gpu), g0 = gmu_alwayson(gmu);
+	delay(1000);
+	uint64_t c1 = gpu_cp_alwayson(gpu), g1 = gmu_alwayson(gmu);
+	printf("SWEET GPU:   CP always-on counter %llu -> %llu (+%llu); GMU counter +%llu in the same 1 ms\n",
+	    c0, c1, c1 - c0, g1 - g0);
+	printf("SWEET GPU: GX reads %s: RBBM_STATUS 0x%08x (%s), CP counter %s\n", c1 > c0 ? "work" : "with findings",
+	    rbbm, (rbbm & A6XX_RBBM_STATUS_GPU_BUSY_IGN_AHB__MASK) ? "busy" : "idle", c1 > c0 ? "runs" : "STOPPED");
+}
+
+/*
+ * Stage 2B (sweetgpu=4): the GMU firmware powers GX. sweet_gmu.c does the
+ * GMU steps 2B.0 to 2B.6; sweetgmu=N stops after 2B.N. GX is checked here
+ * with stage 2A's clock counter.
+ */
+static void
+gpu_stage2b(vm_offset_t gcc, vm_offset_t cc, vm_offset_t gmu, int bin)
+{
+	printf("SWEET GPU: stage 2B (sweetgpu=%d sweetgmu=%d%s): the GMU firmware powers GX\n", gpu_level,
+	    gpu_gmu_stop, gpu_gmu_rsc == 1 ? " sweetgmursc=1" : "");
+	if (bin != (int)GPU_BIN_2B) {
+		printf("SWEET GPU: stage 2B stopped: speed bin %d; the GMU perf table is for bin %u\n", bin, GPU_BIN_2B);
+		return;
+	}
+	if (!gpu_blobs[BLOB_GMU].va || !gpu_blobs[BLOB_GMU_MEM].va) {
+		printf("SWEET GPU: stage 2B stopped: GPU-GMU or GPU-GMU-MEM missing (mkboot.sh GPUFW=1)\n");
+		return;
+	}
+	vm_offset_t gpu = ml_io_map(GPU_PA, GPU_REGS_SIZE);
+	if (!gpu) {
+		printf("SWEET GPU: stage 2B mapping failed\n");
+		return;
+	}
+	gpu_log_gx(cc, gmu, "as found", false);
+	int step = 0;
+	bool ok = sweet_gmu_survey(gmu, gpu_blobs[BLOB_GMU_MEM].pa, gpu_blobs[BLOB_GMU_MEM].len);
+	if (ok && gpu_gmu_stop >= 1) {
+		step = 1;
+		ok = sweet_gmu_mem();
+	}
+	if (ok && gpu_gmu_stop >= 2) {
+		step = 2;
+		ok = sweet_gmu_rpmh();
+	}
+	if (ok && gpu_gmu_stop >= 3) {
+		step = 3;
+		ok = sweet_gmu_boot(gpu_blobs[BLOB_GMU].va, gpu_blobs[BLOB_GMU].len, gpu_gmu_rsc == 1);
+	}
+	if (ok && gpu_gmu_stop >= 4) {
+		step = 4;
+		ok = sweet_gmu_gx_on();
+		ok = gpu_gx_check(gcc, cc, gmu, "after GMU rail") && ok;
+	}
+	if (ok && gpu_gmu_stop >= 5) {
+		step = 5;
+		ok = sweet_gmu_hfi();
+	}
+	if (ok && gpu_gmu_stop >= 6) {
+		step = 6;
+		ok = sweet_gmu_oob_gpu();
+		bool runs = gpu_gx_check(gcc, cc, gmu, "after OOB_GPU");
+		if (ok && runs) {
+			gpu_gx_reads(gpu, gmu);
+		}
+		ok = ok && runs;
+		for (unsigned s = 10; s <= 60; s += 10) {
+			gpu_sleep_ms(10000);
+			char when[24];
+			snprintf(when, sizeof(when), "monitor %u s", s);
+			sweet_gmu_status(when);
+			printf("SWEET GPU: %s: gx_gdscr 0x%08x\n", when, gpu_rd(cc, GPUCC_GX_GDSCR));
+		}
+	}
+	printf("SWEET GPU: stage 2B %s at 2B.%d (sweetgmu=%d); what is on stays on\n",
+	    ok ? "done" : "STOPPED by a failure", step, gpu_gmu_stop);
+}
+
 static void
 gpu_thread(void *arg, wait_result_t result)
 {
@@ -1041,18 +1130,22 @@ gpu_thread(void *arg, wait_result_t result)
 	}
 	printf("SWEET GPU: stage 0 (sweetgpu=%d): firmware blobs, cmd-db, speed bin; no GPU registers\n",
 	    gpu_level);
-	if (gpu_level > 3) {
-		printf("SWEET GPU: stages above 2A are not built yet; running stages 0 to 2A\n");
+	if (gpu_level > 4) {
+		printf("SWEET GPU: stages above 2B are not built yet; running stages 0, 1 and 2B\n");
 	}
 	unsigned found = gpu_find_blobs();
 	gpu_check_blobs();
-	printf("SWEET GPU: %u of %u firmware blobs present\n", found, (unsigned)BLOB_COUNT);
+	printf("SWEET GPU: %u of %u blobs present\n", found, (unsigned)BLOB_COUNT);
 	gpu_cmddb();
-	gpu_speed_bin();
+	int bin = gpu_speed_bin();
 	printf("SWEET GPU: stage 0 done\n");
 	vm_offset_t gcc = 0, cc = 0, gmu = 0;
-	if (gpu_level >= 2 && gpu_stage1(&gcc, &cc, &gmu) && gpu_level >= 3) {
-		gpu_stage2a(gcc, cc, gmu);
+	if (gpu_level >= 2 && gpu_stage1(&gcc, &cc, &gmu)) {
+		if (gpu_level == 3) {
+			gpu_stage2a(gcc, cc, gmu);
+		} else if (gpu_level >= 4) {
+			gpu_stage2b(gcc, cc, gmu, bin);
+		}
 	}
 	if (gpu_hang == 1) {
 		gpu_pause("deliberate hang (sweetgpuhang=1): interrupts off, spinning; pull the log from recovery");
@@ -1075,6 +1168,11 @@ sweet_gpu_init(void)
 	if (gpu_delay_s > 600) {
 		gpu_delay_s = SWEET_GPU_DELAY_S;
 	}
+	(void)PE_parse_boot_argn("sweetgmu", &gpu_gmu_stop, sizeof(gpu_gmu_stop));
+	if (gpu_gmu_stop < 0 || gpu_gmu_stop > 6) {
+		gpu_gmu_stop = 0;
+	}
+	(void)PE_parse_boot_argn("sweetgmursc", &gpu_gmu_rsc, sizeof(gpu_gmu_rsc));
 	thread_t thread;
 	if (kernel_thread_start(gpu_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
