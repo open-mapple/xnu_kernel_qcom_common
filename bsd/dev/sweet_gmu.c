@@ -422,11 +422,22 @@ sweet_gmu_mem(void)
 		}
 	}
 	gpu_pause("SMMU context bank and stream match for the GMU (0x5040000)");
-	gm_cb = sweet_smmu_attach(gmu_streams, sizeof(gmu_streams) / sizeof(gmu_streams[0]), gm_mem_pa);
+	gm_cb = sweet_smmu_attach(gmu_streams, sizeof(gmu_streams) / sizeof(gmu_streams[0]), gm_mem_pa, 32u, -1);
 	if (gm_cb < 0) {
 		return false;
 	}
 	return sweet_smmu_faults(gm_cb, "after attach") == 0;
+}
+
+/* len bytes of GPU-GMU-MEM after the GMU's part, uncached; 0 before 2B.1 or if it does not fit. */
+vm_offset_t
+sweet_gmu_spare(uint32_t len, uint64_t *pa)
+{
+	if (!gm_mem || len > gm_mem_len - GMEM_USED) {
+		return 0;
+	}
+	*pa = gm_mem_pa + GMEM_USED;
+	return gm_mem + GMEM_USED;
 }
 
 /*

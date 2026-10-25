@@ -1,5 +1,5 @@
 /*
- * SM7150 Adreno 618 bring-up (docs/GPU_A618_PLAN.md), stages 0, 1, 2A and 2B.
+ * SM7150 Adreno 618 bring-up (docs/GPU_A618_PLAN.md), stages 0, 1, 2A, 2B and 3.
  *
  * Boot-arg sweetgpu=N (N >= 1) starts a thread sweetgpudelay seconds after
  * boot (default 40, so the home screen is up first). Stage 0 (N >= 1) only
@@ -73,6 +73,12 @@
  *  2B.5 HFI queues and messages
  *  2B.6 OOB_GPU and a DCVS vote, the clock counter again, the first GX reads
  *       if gx_gfx3d runs, then a minute of GMU status every 10 s
+ * Stage 3 (sweetgpu=5, after all of 2B, so sweetgmu=6) gives the GPU its own
+ * SMMU bank: bank 0 (kgsl's) for stream 0 with a 36-bit input range and one
+ * level-1 table in GPU-GMU-MEM past the GMU's part, mapping DRAM
+ * 0x80000000..0x1ffffffff 1:1 in 1 GiB blocks. ATOS is off on this SMMU and
+ * the GPU sends nothing yet, so the test is the readback and fault-free
+ * banks for 30 s; stage 4's first CP fetch is the first walk.
  * GMU and cx_misc offsets come from the generated sweet_gpu_regs.h; GCC and
  * gpucc offsets from the downstream drivers above. Everything stays on after
  * the last stage that runs.
@@ -1053,25 +1059,25 @@ gpu_gx_reads(vm_offset_t gpu, vm_offset_t gmu)
 /*
  * Stage 2B (sweetgpu=4): the GMU firmware powers GX. sweet_gmu.c does the
  * GMU steps 2B.0 to 2B.6; sweetgmu=N stops after 2B.N. GX is checked here
- * with stage 2A's clock counter.
+ * with stage 2A's clock counter. True if every step that ran passed.
  */
-static void
+static bool
 gpu_stage2b(vm_offset_t gcc, vm_offset_t cc, vm_offset_t gmu, int bin)
 {
 	printf("SWEET GPU: stage 2B (sweetgpu=%d sweetgmu=%d%s): the GMU firmware powers GX\n", gpu_level,
 	    gpu_gmu_stop, gpu_gmu_rsc == 1 ? " sweetgmursc=1" : "");
 	if (bin != (int)GPU_BIN_2B) {
 		printf("SWEET GPU: stage 2B stopped: speed bin %d; the GMU perf table is for bin %u\n", bin, GPU_BIN_2B);
-		return;
+		return false;
 	}
 	if (!gpu_blobs[BLOB_GMU].va || !gpu_blobs[BLOB_GMU_MEM].va) {
 		printf("SWEET GPU: stage 2B stopped: GPU-GMU or GPU-GMU-MEM missing (mkboot.sh GPUFW=1)\n");
-		return;
+		return false;
 	}
 	vm_offset_t gpu = ml_io_map(GPU_PA, GPU_REGS_SIZE);
 	if (!gpu) {
 		printf("SWEET GPU: stage 2B mapping failed\n");
-		return;
+		return false;
 	}
 	gpu_log_gx(cc, gmu, "as found", false);
 	int step = 0;
@@ -1115,6 +1121,55 @@ gpu_stage2b(vm_offset_t gcc, vm_offset_t cc, vm_offset_t gmu, int bin)
 	}
 	printf("SWEET GPU: stage 2B %s at 2B.%d (sweetgmu=%d); what is on stays on\n",
 	    ok ? "done" : "STOPPED by a failure", step, gpu_gmu_stop);
+	return ok;
+}
+
+/* Stage 3: the GPU's SMMU bank, stream 0, DRAM mapped 1:1 (see the top of this file) */
+#define GPU_SMMU_SID            0u
+#define GPU_SMMU_BANK           0
+#define GPU_SMMU_IA_BITS        36u
+#define GPU_IDMAP_START         0x80000000ull
+#define GPU_IDMAP_END           0x200000000ull
+#define GPU_SMMU_PT_SIZE        0x1000u         /* level 1 only: 1 GiB blocks */
+#define A6XX_RBBM_STATUS3_SMMU_STALLED  (1u << 24)
+
+static bool
+gpu_stage3(vm_offset_t gpu)
+{
+	static const uint32_t sids[] = { GPU_SMMU_SID };
+	printf("SWEET GPU: stage 3 (sweetgpu=5): SMMU bank %d for GPU stream %u, %#llx..%#llx 1:1\n", GPU_SMMU_BANK,
+	    GPU_SMMU_SID, GPU_IDMAP_START, GPU_IDMAP_END - 1u);
+	uint64_t pa = 0;
+	vm_offset_t va = sweet_gmu_spare(GPU_SMMU_PT_SIZE, &pa);
+	if (!va) {
+		printf("SWEET GPU: stage 3 stopped: no room past the GMU's part of GPU-GMU-MEM\n");
+		return false;
+	}
+	struct sweet_smmu_pt pt;
+	sweet_smmu_pt_init(&pt, va, pa, GPU_SMMU_PT_SIZE);
+	if (!sweet_smmu_map_1g(&pt, GPU_IDMAP_START, GPU_IDMAP_START, GPU_IDMAP_END - GPU_IDMAP_START)) {
+		return false;
+	}
+	gpu_pause("SMMU bank 0 and a stream match for GPU stream 0 (0x5040000)");
+	int cb = sweet_smmu_attach(sids, 1, pa, GPU_SMMU_IA_BITS, GPU_SMMU_BANK);
+	if (cb < 0) {
+		return false;
+	}
+	bool ok = sweet_smmu_faults(cb, "stage 3 after attach") == 0;
+	uint32_t st3 = gpu_rd(gpu, REG_A6XX_RBBM_STATUS3 * 4u);
+	printf("SWEET GPU:   RBBM_STATUS 0x%08x RBBM_STATUS3 0x%08x (%s)\n", gpu_rd(gpu, REG_A6XX_RBBM_STATUS * 4u), st3,
+	    (st3 & A6XX_RBBM_STATUS3_SMMU_STALLED) ? "STALLED on an SMMU fault" : "not stalled");
+	ok = ok && !(st3 & A6XX_RBBM_STATUS3_SMMU_STALLED);
+	for (unsigned s = 10; s <= 30; s += 10) {
+		gpu_sleep_ms(10000);
+		char when[32];
+		snprintf(when, sizeof(when), "stage 3 monitor %u s", s);
+		ok = sweet_smmu_faults(cb, when) == 0 && ok;
+		sweet_gmu_status(when);
+	}
+	printf("SWEET GPU: stage 3 %s: bank %d %s; what is on stays on\n", ok ? "done" : "STOPPED by a failure", cb,
+	    ok ? "set up, no fault" : "has a fault");
+	return ok;
 }
 
 static void
@@ -1130,8 +1185,8 @@ gpu_thread(void *arg, wait_result_t result)
 	}
 	printf("SWEET GPU: stage 0 (sweetgpu=%d): firmware blobs, cmd-db, speed bin; no GPU registers\n",
 	    gpu_level);
-	if (gpu_level > 4) {
-		printf("SWEET GPU: stages above 2B are not built yet; running stages 0, 1 and 2B\n");
+	if (gpu_level > 5) {
+		printf("SWEET GPU: stages above 3 are not built yet; running stages 0, 1, 2B and 3\n");
 	}
 	unsigned found = gpu_find_blobs();
 	gpu_check_blobs();
@@ -1143,8 +1198,13 @@ gpu_thread(void *arg, wait_result_t result)
 	if (gpu_level >= 2 && gpu_stage1(&gcc, &cc, &gmu)) {
 		if (gpu_level == 3) {
 			gpu_stage2a(gcc, cc, gmu);
-		} else if (gpu_level >= 4) {
-			gpu_stage2b(gcc, cc, gmu, bin);
+		} else if (gpu_level >= 4 && gpu_stage2b(gcc, cc, gmu, bin) && gpu_level >= 5) {
+			vm_offset_t gpu = ml_io_map(GPU_PA, GPU_REGS_SIZE);
+			if (gpu_gmu_stop != 6) {
+				printf("SWEET GPU: stage 3 needs all of 2B (sweetgmu=6); not run\n");
+			} else if (gpu) {
+				(void)gpu_stage3(gpu);
+			}
 		}
 	}
 	if (gpu_hang == 1) {

@@ -79,7 +79,8 @@ struct sweet_smmu_pt {
 bool sweet_smmu_survey(void);
 void sweet_smmu_pt_init(struct sweet_smmu_pt *pt, vm_offset_t va, uint64_t pa, uint32_t size);
 bool sweet_smmu_map(struct sweet_smmu_pt *pt, uint32_t iova, uint64_t pa, uint32_t len);
-int sweet_smmu_attach(const uint32_t *sids, unsigned nsid, uint64_t ttbr);
+bool sweet_smmu_map_1g(struct sweet_smmu_pt *pt, uint64_t iova, uint64_t pa, uint64_t len);
+int sweet_smmu_attach(const uint32_t *sids, unsigned nsid, uint64_t ttbr, unsigned ia_bits, int want);
 uint32_t sweet_smmu_faults(int cb, const char *when);
 
 /* sweet_gmu.c: stage 2B steps, in order; each needs the previous one */
@@ -91,6 +92,7 @@ bool sweet_gmu_gx_on(void);                                                     
 bool sweet_gmu_hfi(void);                                                       /* 2B.5 */
 bool sweet_gmu_oob_gpu(void);                                                   /* 2B.6 */
 void sweet_gmu_status(const char *when);
+vm_offset_t sweet_gmu_spare(uint32_t len, uint64_t *pa);       /* GPU-GMU-MEM past the GMU's part, after 2B.1 */
 
 /* sweet_rpmh.c: cmd-db address of an ARC (slave 3) or BCM (slave 5) resource, and an ARC's levels */
 int sweet_rpmh_cmddb_query(const char *res, unsigned slave, uint32_t *addr, unsigned *vlvl,

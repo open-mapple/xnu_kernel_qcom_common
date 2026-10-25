@@ -1,6 +1,6 @@
 /*
  * SM7150 GPU SMMU (qcom,smmu-v2 "kgsl_smmu" at 0x5040000) for the Adreno 618
- * bring-up, docs/GPU_A618_PLAN.md stage 2B.0, 2B.1 and later stage 3.
+ * bring-up, docs/GPU_A618_PLAN.md stage 2B.0, 2B.1 and stage 3.
  *
  * Register layout from the ARM SMMUv2 architecture spec; the global space is
  * 2^(NUMPAGENDXB + 1) pages, then the context banks, one page each (kgsl's
@@ -8,12 +8,14 @@
  * gcc_gpu_memnoc_gfx, both on after stage 1.
  *  - sweet_smmu_survey reads the ID and global registers, every stream-match
  *    group and every context bank; nothing is written.
- *  - sweet_smmu_attach programs one free bank (never bank 0, the GPU's) as
- *    AArch64 stage 1 with stage 2 bypass: 4 KiB granule, 32-bit input range
- *    (walks start at level 1), non-cacheable walks, faults terminate. Then one
- *    free stream-match group per stream (mask 0) points it there. Every write
- *    is read back; a mismatch undoes the stream matches.
- *  - sweet_smmu_map fills the tables in caller memory that is mapped
+ *  - sweet_smmu_attach programs a bank as AArch64 stage 1 with stage 2
+ *    bypass: 4 KiB granule, a 31- to 39-bit input range (walks start at
+ *    level 1), non-cacheable walks, faults terminate. The bank is the one
+ *    asked for (bank 0 is the GPU's, as in kgsl) or any free one but 0. Then
+ *    one free stream-match group per stream (mask 0) points it there. Every
+ *    write is read back; a mismatch undoes the stream matches.
+ *  - sweet_smmu_map (4 KiB pages below 4 GiB) and sweet_smmu_map_1g (1 GiB
+ *    level-1 blocks) fill the tables in caller memory that is mapped
  *    uncached, so the SMMU's non-cacheable walks see every store.
  * Unmatched streams keep bypassing; sCR0 is written only if the SMMU is off
  * (CLIENTPD), and then only to turn it on with unmatched streams bypassing.
@@ -83,6 +85,9 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 #define TCR2_SEP_UPSTREAM       (7u << 15)
 #define TCR2_AS                 (1u << 4)
 #define CB_TCR_T0SZ_32             32u
+#define CB_TCR_T0SZ(ia)            (64u - (ia))
+#define SMMU_IA_L1_MIN             31u             /* 4 KiB granule: walks start at level 1 for 31..39 bits */
+#define SMMU_IA_L1_MAX             39u
 #define CB_TCR_SH0_OUTER           (2u << 12)
 #define CB_TCR_EPD1                (1u << 23)      /* IRGN0 = ORGN0 = 0: non-cacheable walks; TG0 = 0: 4 KiB */
 #define MAIR0_VALUE             0xf404ff44u     /* attr 0 Normal NC, 1 WB, 2 Device nGnRE, 3 outer WB */
@@ -95,17 +100,20 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 /* Long-descriptor entries, 4 KiB granule */
 #define PTE_TABLE               3u
 #define PTE_PAGE                3u
+#define PTE_BLOCK               1u              /* level 1: 1 GiB */
 #define PTE_AP_UNPRIV           (1u << 6)       /* read/write at any privilege; AP[2] = 0 */
 #define PTE_SH_OUTER            (2u << 8)
 #define PTE_AF                  (1u << 10)
 #define PTE_NG                  (1u << 11)
 #define PTE_PAGE_RW             (PTE_PAGE | PTE_AP_UNPRIV | PTE_SH_OUTER | PTE_AF | PTE_NG)    /* attr 0 */
+#define PTE_BLOCK_RW            (PTE_BLOCK | PTE_AP_UNPRIV | PTE_SH_OUTER | PTE_AF | PTE_NG)
 #define PTE_ADDR_MASK           0x0000fffffffff000ull
 #define PT_SIZE                 0x1000u
+#define BLOCK_1G                0x40000000ull
 
 static vm_offset_t smmu;
 static uint32_t smmu_pgsize, smmu_cb_base;
-static unsigned smmu_nsmr, smmu_ncb, smmu_oas;
+static unsigned smmu_nsmr, smmu_ncb, smmu_oas, smmu_ias;
 static bool smmu_ok;
 
 static uint64_t
@@ -153,9 +161,11 @@ sweet_smmu_survey(void)
 	smmu_pgsize = (idr1 & IDR1_PAGESIZE) ? 0x10000u : 0x1000u;
 	smmu_cb_base = (1u << (((idr1 >> 28) & 7u) + 1u)) * smmu_pgsize;
 	smmu_oas = (idr2 >> 4) & 0xfu;
-	printf("SWEET SMMU: %u stream-match groups, %u SID bits, %u context banks of %#x from +%#x, OAS %u bits, "
+	smmu_ias = idr2 & 0xfu;
+	printf("SWEET SMMU: %u stream-match groups, %u SID bits, %u context banks of %#x from +%#x, IAS %u OAS %u bits, "
 	    "stage 1 %s, 4K tables %s, %s\n", smmu_nsmr, (idr0 >> 9) & 0xfu, smmu_ncb, smmu_pgsize, smmu_cb_base,
-	    smmu_oas_bits(smmu_oas), (idr0 & IDR0_S1TS) ? "yes" : "NO", (idr2 & IDR2_PTFS_4K) ? "yes" : "NO",
+	    smmu_oas_bits(smmu_ias), smmu_oas_bits(smmu_oas), (idr0 & IDR0_S1TS) ? "yes" : "NO",
+	    (idr2 & IDR2_PTFS_4K) ? "yes" : "NO",
 	    (scr0 & sCR0_CLIENTPD) ? "OFF (CLIENTPD: all streams bypass)" : "on");
 	if (!smmu_nsmr || smmu_nsmr > 128 || !smmu_ncb || smmu_cb_base + smmu_ncb * smmu_pgsize > SMMU_SIZE) {
 		printf("SWEET SMMU: unexpected geometry; not used\n");
@@ -241,6 +251,28 @@ sweet_smmu_map(struct sweet_smmu_pt *pt, uint32_t iova, uint64_t pa, uint32_t le
 	return true;
 }
 
+/* 1 GiB level-1 blocks iova..iova+len -> pa..; refuses a slot that is already in use. */
+bool
+sweet_smmu_map_1g(struct sweet_smmu_pt *pt, uint64_t iova, uint64_t pa, uint64_t len)
+{
+	if ((iova | pa | len) & (BLOCK_1G - 1u) || !len || (iova + len) / BLOCK_1G > PT_SIZE / 8u ||
+	    ((pa + len - 1u) >> smmu_oas_bits(smmu_oas))) {
+		printf("SWEET SMMU: map %#llx -> %#llx len %#llx: not 1 GiB aligned or out of range\n", iova, pa, len);
+		return false;
+	}
+	for (uint64_t off = 0; off < len; off += BLOCK_1G) {
+		vm_offset_t slot = pt->va + 8u * (vm_offset_t)((iova + off) / BLOCK_1G);
+		if (*(volatile uint64_t *)slot & 1u) {
+			printf("SWEET SMMU: map %#llx: level-1 slot in use\n", iova + off);
+			return false;
+		}
+		*(volatile uint64_t *)slot = (pa + off) | PTE_BLOCK_RW;
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+	printf("SWEET SMMU: mapped %#llx..%#llx -> %#llx in 1 GiB blocks\n", iova, iova + len - 1u, pa);
+	return true;
+}
+
 static bool
 smmu_tlb_sync(vm_offset_t base, uint32_t sync, uint32_t status)
 {
@@ -258,17 +290,27 @@ smmu_check(const char *what, uint32_t got, uint32_t want, uint32_t mask)
 	return false;
 }
 
-/* A bank no valid stream-match group translates through and with translation off; not bank 0. */
-static int
-smmu_free_bank(void)
+/* No valid stream-match group translates through bank n, and its translation is off. */
+static bool
+smmu_bank_free(unsigned n)
 {
+	bool used = (gpu_rd(smmu_cb(n), CB_SCTLR) & SCTLR_M) != 0;
+	for (unsigned i = 0; i < smmu_nsmr && !used; ++i) {
+		uint32_t s2cr = gpu_rd(smmu, SMMU_S2CR(i));
+		used = (gpu_rd(smmu, SMMU_SMR(i)) & SMR_VALID) && S2CR_TYPE(s2cr) == 0 && S2CR_CBNDX(s2cr) == n;
+	}
+	return !used;
+}
+
+/* want if it is free, or (want < 0) the highest free bank but 0; -1 if none. */
+static int
+smmu_free_bank(int want)
+{
+	if (want >= 0) {
+		return (unsigned)want < smmu_ncb && smmu_bank_free((unsigned)want) ? want : -1;
+	}
 	for (unsigned n = smmu_ncb - 1u; n >= 1u; --n) {
-		bool used = (gpu_rd(smmu_cb(n), CB_SCTLR) & SCTLR_M) != 0;
-		for (unsigned i = 0; i < smmu_nsmr && !used; ++i) {
-			uint32_t s2cr = gpu_rd(smmu, SMMU_S2CR(i));
-			used = (gpu_rd(smmu, SMMU_SMR(i)) & SMR_VALID) && S2CR_TYPE(s2cr) == 0 && S2CR_CBNDX(s2cr) == n;
-		}
-		if (!used) {
+		if (smmu_bank_free(n)) {
 			return (int)n;
 		}
 	}
@@ -295,12 +337,12 @@ smmu_smr_probe(unsigned g, uint32_t sid)
 
 /*
  * Translate each of nsid single streams (mask 0, one stream-match group per
- * stream, as kgsl's one-cell iommus do) through a free context bank whose
- * level-1 table is at ttbr. Returns the bank, or -1 with no valid stream
- * match left behind.
+ * stream, as kgsl's one-cell iommus do) through context bank want (or a free
+ * one but 0 if want < 0) with an ia_bits input range, whose level-1 table is
+ * at ttbr. Returns the bank, or -1 with no valid stream match left behind.
  */
 int
-sweet_smmu_attach(const uint32_t *sids, unsigned nsid, uint64_t ttbr)
+sweet_smmu_attach(const uint32_t *sids, unsigned nsid, uint64_t ttbr, unsigned ia_bits, int want)
 {
 	if (!smmu_ok) {
 		printf("SWEET SMMU: not surveyed or no stage 1 with 4K tables; not attached\n");
@@ -309,6 +351,11 @@ sweet_smmu_attach(const uint32_t *sids, unsigned nsid, uint64_t ttbr)
 	unsigned pabits = smmu_oas_bits(smmu_oas);
 	if ((ttbr & (PT_SIZE - 1u)) || (pabits < 64 && (ttbr >> pabits))) {
 		printf("SWEET SMMU: tables at %#llx are unaligned or above the %u-bit output range\n", ttbr, pabits);
+		return -1;
+	}
+	if (ia_bits < SMMU_IA_L1_MIN || ia_bits > SMMU_IA_L1_MAX || ia_bits > smmu_oas_bits(smmu_ias)) {
+		printf("SWEET SMMU: %u-bit input range: walks would not start at level 1, or above IAS %u\n", ia_bits,
+		    smmu_oas_bits(smmu_ias));
 		return -1;
 	}
 	unsigned grp[SMMU_ATTACH_MAX], nfree = 0;
@@ -332,19 +379,20 @@ sweet_smmu_attach(const uint32_t *sids, unsigned nsid, uint64_t ttbr)
 			}
 		}
 	}
-	int bank = smmu_free_bank();
+	int bank = smmu_free_bank(want);
 	if (nfree < nsid || bank < 0) {
-		printf("SWEET SMMU: no free %s; not attached\n", nfree < nsid ? "stream-match groups" : "context bank");
+		printf("SWEET SMMU: no free %s; not attached\n", nfree < nsid ? "stream-match groups" :
+		    want >= 0 ? "context bank of the one asked for" : "context bank");
 		return -1;
 	}
 	unsigned n = (unsigned)bank;
 	vm_offset_t cb = smmu_cb(n), gr1 = smmu + smmu_pgsize;
-	printf("SWEET SMMU: %u stream(s) from %#x, mask 0 -> SMR%u.., bank %u, tables at %#llx\n", nsid, sids[0], grp[0], n,
-	    ttbr);
+	printf("SWEET SMMU: %u stream(s) from %#x, mask 0 -> SMR%u.., bank %u, %u-bit input, tables at %#llx\n", nsid,
+	    sids[0], grp[0], n, ia_bits, ttbr);
 
 	const uint32_t cbar = CBAR_S1_BYPASS_S2 | CBAR_BPSHCFG_NSH | CBAR_MEMATTR_WB;
 	const uint32_t tcr2 = TCR2_SEP_UPSTREAM | TCR2_AS | (smmu_oas < 5 ? smmu_oas : 5u);
-	const uint32_t tcr = CB_TCR_EPD1 | CB_TCR_SH0_OUTER | CB_TCR_T0SZ_32;
+	const uint32_t tcr = CB_TCR_EPD1 | CB_TCR_SH0_OUTER | CB_TCR_T0SZ(ia_bits);
 	const uint64_t ttbr0 = ttbr | (uint64_t)n << 48;        /* ASID = bank */
 	gpu_wr(cb, CB_SCTLR, 0);
 	gpu_wr(gr1, SMMU_CBA2R(n), CBA2R_VA64);
