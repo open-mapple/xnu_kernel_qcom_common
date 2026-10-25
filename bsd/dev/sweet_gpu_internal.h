@@ -79,7 +79,7 @@ struct sweet_smmu_pt {
 bool sweet_smmu_survey(void);
 void sweet_smmu_pt_init(struct sweet_smmu_pt *pt, vm_offset_t va, uint64_t pa, uint32_t size);
 bool sweet_smmu_map(struct sweet_smmu_pt *pt, uint32_t iova, uint64_t pa, uint32_t len);
-int sweet_smmu_attach(uint32_t sid, uint32_t mask, uint64_t ttbr);
+int sweet_smmu_attach(const uint32_t *sids, unsigned nsid, uint64_t ttbr);
 uint32_t sweet_smmu_faults(int cb, const char *when);
 
 /* sweet_gmu.c: stage 2B steps, in order; each needs the previous one */

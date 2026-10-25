@@ -10,9 +10,9 @@
  *    group and every context bank; nothing is written.
  *  - sweet_smmu_attach programs one free bank (never bank 0, the GPU's) as
  *    AArch64 stage 1 with stage 2 bypass: 4 KiB granule, 32-bit input range
- *    (walks start at level 1), non-cacheable walks, faults terminate. Then a
- *    free stream-match group points the given streams at it. Every write is
- *    read back; a mismatch undoes the stream match.
+ *    (walks start at level 1), non-cacheable walks, faults terminate. Then one
+ *    free stream-match group per stream (mask 0) points it there. Every write
+ *    is read back; a mismatch undoes the stream matches.
  *  - sweet_smmu_map fills the tables in caller memory that is mapped
  *    uncached, so the SMMU's non-cacheable walks see every store.
  * Unmatched streams keep bypassing; sCR0 is written only if the SMMU is off
@@ -69,6 +69,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 #define TLBSTATUS_ACTIVE        (1u << 0)
 #define SMR_VALID               (1u << 31)
 #define SMR_ID_MASK             0x7fffu
+#define SMMU_ATTACH_MAX         4u              /* streams per attach */
 #define S2CR_TYPE(v)            (((v) >> 16) & 3u)      /* 0 translate, 1 bypass, 2 fault */
 #define S2CR_CBNDX(v)           ((v) & 0xffu)
 #define S2CR_CHECKED            ((3u << 16) | 0xffu)
@@ -273,11 +274,31 @@ smmu_free_bank(void)
 }
 
 /*
- * Translate streams sid..(sid | mask) through a free context bank whose
- * level-1 table is at ttbr. Returns the bank, or -1 with the SMMU as it was.
+ * G3b: an SMR write (valid, mask 1) read back 0 while the bank and S2CR
+ * stuck, and an S2CR write of type fault was ignored, which looks like a
+ * hypervisor that emulates stream mapping. Before giving up on an SMR, write
+ * it without the valid bit and read that back: it tells "SMR writes are
+ * dropped" from "this value is refused". The SMR is left invalid.
+ */
+static void
+smmu_smr_probe(unsigned g, uint32_t sid)
+{
+	gpu_wr(smmu, SMMU_SMR(g), sid & SMR_ID_MASK);
+	uint32_t plain = gpu_rd(smmu, SMMU_SMR(g));
+	gpu_wr(smmu, SMMU_SMR(g), 0);
+	printf("SWEET SMMU:   probe: SMR%u without the valid bit, wrote 0x%08x, reads 0x%08x (%s); now 0x%08x\n", g,
+	    sid & SMR_ID_MASK, plain, plain == (sid & SMR_ID_MASK) ? "plain SMR writes stick, the valid one was refused" :
+	    "SMR writes are dropped", gpu_rd(smmu, SMMU_SMR(g)));
+}
+
+/*
+ * Translate each of nsid single streams (mask 0, one stream-match group per
+ * stream, as kgsl's one-cell iommus do) through a free context bank whose
+ * level-1 table is at ttbr. Returns the bank, or -1 with no valid stream
+ * match left behind.
  */
 int
-sweet_smmu_attach(uint32_t sid, uint32_t mask, uint64_t ttbr)
+sweet_smmu_attach(const uint32_t *sids, unsigned nsid, uint64_t ttbr)
 {
 	if (!smmu_ok) {
 		printf("SWEET SMMU: not surveyed or no stage 1 with 4K tables; not attached\n");
@@ -288,25 +309,36 @@ sweet_smmu_attach(uint32_t sid, uint32_t mask, uint64_t ttbr)
 		printf("SWEET SMMU: tables at %#llx are unaligned or above the %u-bit output range\n", ttbr, pabits);
 		return -1;
 	}
-	int free_smr = -1;
+	unsigned grp[SMMU_ATTACH_MAX], nfree = 0;
+	if (nsid == 0 || nsid > SMMU_ATTACH_MAX) {
+		printf("SWEET SMMU: %u streams; 1 to %u supported\n", nsid, SMMU_ATTACH_MAX);
+		return -1;
+	}
 	for (unsigned i = 0; i < smmu_nsmr; ++i) {
 		uint32_t smr = gpu_rd(smmu, SMMU_SMR(i));
 		uint32_t id = smr & SMR_ID_MASK, m = (smr >> 16) & SMR_ID_MASK;
 		if (!(smr & SMR_VALID)) {
-			free_smr = free_smr < 0 ? (int)i : free_smr;
-		} else if (((sid ^ id) & ~(m | mask) & SMR_ID_MASK) == 0) {
-			printf("SWEET SMMU: SMR%u (0x%08x) already matches stream %#x/%#x; not attached\n", i, smr, sid, mask);
-			return -1;
+			if (nfree < nsid) {
+				grp[nfree++] = i;
+			}
+			continue;
+		}
+		for (unsigned s = 0; s < nsid; ++s) {
+			if (((sids[s] ^ id) & ~m & SMR_ID_MASK) == 0) {
+				printf("SWEET SMMU: SMR%u (0x%08x) already matches stream %#x; not attached\n", i, smr, sids[s]);
+				return -1;
+			}
 		}
 	}
 	int bank = smmu_free_bank();
-	if (free_smr < 0 || bank < 0) {
-		printf("SWEET SMMU: no free %s; not attached\n", free_smr < 0 ? "stream-match group" : "context bank");
+	if (nfree < nsid || bank < 0) {
+		printf("SWEET SMMU: no free %s; not attached\n", nfree < nsid ? "stream-match groups" : "context bank");
 		return -1;
 	}
-	unsigned n = (unsigned)bank, g = (unsigned)free_smr;
+	unsigned n = (unsigned)bank;
 	vm_offset_t cb = smmu_cb(n), gr1 = smmu + smmu_pgsize;
-	printf("SWEET SMMU: streams %#x/%#x -> SMR%u, bank %u, tables at %#llx\n", sid, mask, g, n, ttbr);
+	printf("SWEET SMMU: %u stream(s) from %#x, mask 0 -> SMR%u.., bank %u, tables at %#llx\n", nsid, sids[0], grp[0], n,
+	    ttbr);
 
 	const uint32_t cbar = CBAR_S1_BYPASS_S2 | CBAR_BPSHCFG_NSH | CBAR_MEMATTR_WB;
 	const uint32_t tcr2 = TCR2_SEP_UPSTREAM | TCR2_AS | (smmu_oas < 5 ? smmu_oas : 5u);
@@ -342,13 +374,24 @@ sweet_smmu_attach(uint32_t sid, uint32_t mask, uint64_t ttbr)
 		return -1;
 	}
 
-	uint32_t s2cr_old = gpu_rd(smmu, SMMU_S2CR(g));
-	const uint32_t s2cr = n, smr = SMR_VALID | (mask & SMR_ID_MASK) << 16 | (sid & SMR_ID_MASK);
-	gpu_wr(smmu, SMMU_S2CR(g), s2cr);
-	gpu_wr(smmu, SMMU_SMR(g), smr);
+	uint32_t s2cr_old[SMMU_ATTACH_MAX];
+	unsigned done = 0;
+	for (; done < nsid && ok; ++done) {
+		unsigned g = grp[done];
+		const uint32_t s2cr = n, smr = SMR_VALID | (sids[done] & SMR_ID_MASK);
+		s2cr_old[done] = gpu_rd(smmu, SMMU_S2CR(g));
+		gpu_wr(smmu, SMMU_S2CR(g), s2cr);
+		gpu_wr(smmu, SMMU_SMR(g), smr);
+		uint32_t got = gpu_rd(smmu, SMMU_SMR(g));
+		printf("SWEET SMMU:   stream %#x: SMR%u 0x%08x -> 0x%08x, S2CR 0x%08x -> 0x%08x\n", sids[done], g, smr, got,
+		    s2cr, gpu_rd(smmu, SMMU_S2CR(g)));
+		ok = smmu_check("S2CR", gpu_rd(smmu, SMMU_S2CR(g)), s2cr, S2CR_CHECKED) &&
+		    smmu_check("SMR", got, smr, 0xffffffffu);
+		if (!ok && got == 0) {
+			smmu_smr_probe(g, sids[done]);
+		}
+	}
 	uint32_t scr0 = gpu_rd(smmu, SMMU_sCR0);
-	ok = smmu_check("S2CR", gpu_rd(smmu, SMMU_S2CR(g)), s2cr, S2CR_CHECKED) &&
-	    smmu_check("SMR", gpu_rd(smmu, SMMU_SMR(g)), smr, 0xffffffffu);
 	if (ok && (scr0 & sCR0_CLIENTPD)) {
 		uint32_t on = scr0 & ~(sCR0_CLIENTPD | sCR0_USFCFG);
 		gpu_wr(smmu, SMMU_sCR0, on);
@@ -362,16 +405,24 @@ sweet_smmu_attach(uint32_t sid, uint32_t mask, uint64_t ttbr)
 		ok = false;
 	}
 	if (!ok) {
-		gpu_wr(smmu, SMMU_SMR(g), 0);
-		gpu_wr(smmu, SMMU_S2CR(g), s2cr_old);
+		/* SMR first: with no valid match the S2CR is unused, even if its fault write is ignored (G3b). */
+		for (unsigned i = 0; i < done; ++i) {
+			unsigned g = grp[i];
+			gpu_wr(smmu, SMMU_SMR(g), 0);
+			gpu_wr(smmu, SMMU_S2CR(g), s2cr_old[i]);
+			printf("SWEET SMMU: attach undone: SMR%u 0x%08x S2CR 0x%08x (wrote back 0x%08x)\n", g,
+			    gpu_rd(smmu, SMMU_SMR(g)), gpu_rd(smmu, SMMU_S2CR(g)), s2cr_old[i]);
+		}
 		gpu_wr(cb, CB_SCTLR, 0);
-		printf("SWEET SMMU: attach undone: SMR%u 0x%08x S2CR 0x%08x, bank %u off\n", g,
-		    gpu_rd(smmu, SMMU_SMR(g)), gpu_rd(smmu, SMMU_S2CR(g)), n);
+		printf("SWEET SMMU: bank %u off\n", n);
 		return -1;
 	}
-	printf("SWEET SMMU: bank %u: SCTLR 0x%08x TCR 0x%08x TCR2 0x%08x TTBR0 0x%016llx; SMR%u 0x%08x S2CR 0x%08x "
-	    "sCR0 0x%08x\n", n, gpu_rd(cb, CB_SCTLR), gpu_rd(cb, CB_TCR), gpu_rd(cb, CB_TCR2), smmu_rd64(cb, CB_TTBR0),
-	    g, gpu_rd(smmu, SMMU_SMR(g)), gpu_rd(smmu, SMMU_S2CR(g)), gpu_rd(smmu, SMMU_sCR0));
+	printf("SWEET SMMU: bank %u: SCTLR 0x%08x TCR 0x%08x TCR2 0x%08x TTBR0 0x%016llx sCR0 0x%08x\n", n,
+	    gpu_rd(cb, CB_SCTLR), gpu_rd(cb, CB_TCR), gpu_rd(cb, CB_TCR2), smmu_rd64(cb, CB_TTBR0), gpu_rd(smmu, SMMU_sCR0));
+	for (unsigned i = 0; i < nsid; ++i) {
+		printf("SWEET SMMU:   SMR%u 0x%08x S2CR 0x%08x\n", grp[i], gpu_rd(smmu, SMMU_SMR(grp[i])),
+		    gpu_rd(smmu, SMMU_S2CR(grp[i])));
+	}
 	return bank;
 }
 

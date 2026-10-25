@@ -94,8 +94,8 @@ extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
 #define GMU_TIMEOUT_US          100000u         /* GPU_START_TIMEOUT, HFI_RSP_TIMEOUT */
 #define GMU_RSCC_TIMEOUT_US     10000u
 #define GMU_SPTPRAC_TIMEOUT_US  10000u          /* SPTPRAC_CTRL_TIMEOUT */
-#define GMU_STREAM              4u              /* SID 4 gmu_user, 5 gmu_kernel */
-#define GMU_STREAM_MASK         1u
+/* Stock DT: gmu_user SID 4, gmu_kernel SID 5, one iommu cell each, so mask 0 (a mask-1 SMR did not stick on G3b) */
+static const uint32_t gmu_streams[] = { 4u, 5u };
 #define SPTPRAC_POWER_ON        0x778000u
 #define SPTPRAC_POWERON_STATUS  (1u << 3)
 #define OOB_GPU                 0u
@@ -376,7 +376,7 @@ gmu_mem_flush(vm_offset_t va, uint32_t len)
 bool
 sweet_gmu_mem(void)
 {
-	printf("SWEET GMU: 2B.1 GMU memory and an SMMU bank for streams %u-%u\n", GMU_STREAM, GMU_STREAM | GMU_STREAM_MASK);
+	printf("SWEET GMU: 2B.1 GMU memory and an SMMU bank for streams %u and %u\n", gmu_streams[0], gmu_streams[1]);
 	if (!gm_mem_pa || gm_mem_len < GMEM_USED || (gm_mem_pa & 0xfffu)) {
 		printf("SWEET GMU: GPU-GMU-MEM missing or too small (mkboot.sh GPUFW=1, tools 0100+)\n");
 		return false;
@@ -402,7 +402,7 @@ sweet_gmu_mem(void)
 		}
 	}
 	gpu_pause("SMMU context bank and stream match for the GMU (0x5040000)");
-	gm_cb = sweet_smmu_attach(GMU_STREAM, GMU_STREAM_MASK, gm_mem_pa);
+	gm_cb = sweet_smmu_attach(gmu_streams, sizeof(gmu_streams) / sizeof(gmu_streams[0]), gm_mem_pa);
 	if (gm_cb < 0) {
 		return false;
 	}
