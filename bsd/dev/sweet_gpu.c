@@ -1,5 +1,6 @@
 /*
- * SM7150 Adreno 618 bring-up (docs/GPU_A618_PLAN.md), stages 0, 1, 2A, 2B and 3.
+ * SM7150 Adreno 618 bring-up (docs/GPU_A618_PLAN.md), stages 0, 1, 2A, 2B and 3;
+ * stages 4 and 5 start from here.
  *
  * Boot-arg sweetgpu=N (N >= 1) starts a thread sweetgpudelay seconds after
  * boot (default 40, so the home screen is up first). Stage 0 (N >= 1) only
@@ -83,6 +84,10 @@
  * sweetcp=N (0-6) stops after step 4.N, from reads only (0) through the init
  * list, the ring registers, the SQE start, CP_ME_INIT and register-write
  * markers to a 30 s hold with the SQE running (6).
+ * Stage 5 (sweetgpu=7, after stage 4 with sweetcp >= 5) is the zap shader in
+ * sweet_zap.c: sweetzap=N (0-6) stops after step 5.N, from read-only SCM
+ * queries (0) through TrustZone loading the zap (3), CP_SET_SECURE_MODE 0 (4)
+ * and the GPU's first writes to DRAM (5) to a 30 s hold (6).
  * GMU and cx_misc offsets come from the generated sweet_gpu_regs.h; GCC and
  * gpucc offsets from the downstream drivers above. Everything stays on after
  * the last stage that runs.
@@ -246,7 +251,7 @@ static struct {
 	const uint8_t *va;
 } gpu_blobs[BLOB_COUNT];
 
-static int gpu_level, gpu_hang, gpu_gmu_stop, gpu_gmu_rsc, gpu_cp_stop;
+static int gpu_level, gpu_hang, gpu_gmu_stop, gpu_gmu_rsc, gpu_cp_stop, gpu_zap_stop;
 static uint32_t gpu_delay_s = SWEET_GPU_DELAY_S;
 static int gpu_sleep_chan;
 
@@ -1190,8 +1195,8 @@ gpu_thread(void *arg, wait_result_t result)
 	}
 	printf("SWEET GPU: stage 0 (sweetgpu=%d): firmware blobs, cmd-db, speed bin; no GPU registers\n",
 	    gpu_level);
-	if (gpu_level > 6) {
-		printf("SWEET GPU: stages above 4 are not built yet; running stages 0 to 4\n");
+	if (gpu_level > 7) {
+		printf("SWEET GPU: stages above 5 are not built yet; running stages 0 to 5\n");
 	}
 	unsigned found = gpu_find_blobs();
 	gpu_check_blobs();
@@ -1209,9 +1214,16 @@ gpu_thread(void *arg, wait_result_t result)
 				printf("SWEET GPU: stage 3 needs all of 2B (sweetgmu=6); not run\n");
 			} else if (gpu) {
 				int cb = -1;
-				if (gpu_stage3(gpu, &cb) && gpu_level >= 6) {
-					(void)sweet_cp_run(gpu_cp_stop, cb, gpu_blobs[BLOB_SQE].va, gpu_blobs[BLOB_SQE].len,
-					    cc + GPUCC_GX_GDSCR);
+				if (gpu_stage3(gpu, &cb) && gpu_level >= 6 &&
+				    sweet_cp_run(gpu_cp_stop, cb, gpu_blobs[BLOB_SQE].va, gpu_blobs[BLOB_SQE].len,
+				    cc + GPUCC_GX_GDSCR) && gpu_level >= 7) {
+					if (gpu_cp_stop < 5) {
+						printf("SWEET GPU: stage 5 needs stage 4 through 4.5 (sweetcp=5 or 6); not run\n");
+					} else {
+						(void)sweet_zap_run(gpu_zap_stop, gpu_blobs[BLOB_ZAP_MDT].va,
+						    gpu_blobs[BLOB_ZAP_MDT].len, gpu_blobs[BLOB_ZAP_B02].va,
+						    gpu_blobs[BLOB_ZAP_B02].len);
+					}
 				}
 			}
 		}
@@ -1245,6 +1257,10 @@ sweet_gpu_init(void)
 	(void)PE_parse_boot_argn("sweetcp", &gpu_cp_stop, sizeof(gpu_cp_stop));
 	if (gpu_cp_stop < 0 || gpu_cp_stop > 6) {
 		gpu_cp_stop = 0;
+	}
+	(void)PE_parse_boot_argn("sweetzap", &gpu_zap_stop, sizeof(gpu_zap_stop));
+	if (gpu_zap_stop < 0 || gpu_zap_stop > 6) {
+		gpu_zap_stop = 0;
 	}
 	thread_t thread;
 	if (kernel_thread_start(gpu_thread, NULL, &thread) == KERN_SUCCESS) {

@@ -19,6 +19,8 @@
  *  4.6 one marker every 10 s for 30 s; the SQE stays running
  * Everything polls. When a step fails the CP state is dumped and, once the SQE
  * runs, it is halted (CP_SQE_CNTL = 0); nothing else is undone.
+ * Stage 5 (sweet_zap.c) uses the ring and the scratch (tripwire) page through
+ * the sweet_cp_* wrappers at the end.
  */
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 #include <sys/param.h>
@@ -570,6 +572,17 @@ cp_hold(void)
 	return ok;
 }
 
+static void
+cp_halt(void)
+{
+	if (cp_sqe_on) {
+		gpu_pause("halt the SQE (CP_SQE_CNTL = 0)");
+		cp_wr(REG_A6XX_CP_SQE_CNTL, 0);
+		cp_sqe_on = false;
+		printf("SWEET CP:   CP_SQE_CNTL now 0x%x\n", cp_rd(REG_A6XX_CP_SQE_CNTL));
+	}
+}
+
 bool
 sweet_cp_run(int stop, int cb, const uint8_t *sqe, uint32_t sqe_len, vm_offset_t gx_gdscr)
 {
@@ -609,15 +622,72 @@ sweet_cp_run(int stop, int cb, const uint8_t *sqe, uint32_t sqe_len, vm_offset_t
 	}
 	if (!ok) {
 		cp_dump("at the failure");
-		if (cp_sqe_on) {
-			gpu_pause("halt the SQE (CP_SQE_CNTL = 0)");
-			cp_wr(REG_A6XX_CP_SQE_CNTL, 0);
-			cp_sqe_on = false;
-			printf("SWEET CP:   CP_SQE_CNTL now 0x%x\n", cp_rd(REG_A6XX_CP_SQE_CNTL));
-		}
+		cp_halt();
 	}
 	printf("SWEET CP: stage 4 %s at 4.%d (sweetcp=%d); %s\n", ok ? "done" : "STOPPED by a failure", step, stop,
 	    cp_sqe_on ? "the SQE stays running" : "the SQE is stopped");
 	return ok;
+}
+
+/* For stage 5, after sweet_cp_run passed 4.4 or later */
+uint32_t
+sweet_cp_rd(uint32_t reg)
+{
+	return cp_rd(reg);
+}
+
+uint32_t
+sweet_cp_pkt7(uint32_t op, uint32_t cnt)
+{
+	return pkt7(op, cnt);
+}
+
+void
+sweet_cp_emit(uint32_t w)
+{
+	cp_emit(w);
+}
+
+void
+sweet_cp_kick(void)
+{
+	cp_kick();
+}
+
+int
+sweet_cp_wait_idle(unsigned timeout_us)
+{
+	return cp_wait_idle(timeout_us);
+}
+
+bool
+sweet_cp_marker(uint32_t val, const char *when)
+{
+	return cp_marker(val, when);
+}
+
+void
+sweet_cp_dump(const char *when)
+{
+	cp_dump(when);
+}
+
+bool
+sweet_cp_clean(const char *when)
+{
+	return cp_clean(when);
+}
+
+void
+sweet_cp_halt(void)
+{
+	cp_halt();
+}
+
+volatile uint32_t *
+sweet_cp_scratch(uint64_t *pa)
+{
+	*pa = cp_trip_pa;
+	return cp_trip;
 }
 #endif /* ARM64_BOARD_CONFIG_SWEET */

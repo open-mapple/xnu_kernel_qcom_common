@@ -1,7 +1,8 @@
 /*
  * Shared by the SM7150 Adreno 618 bring-up files (docs/GPU_A618_PLAN.md):
  * sweet_gpu.c (stages 0 to 2, the 2B flow), sweet_gmu.c (GMU firmware,
- * RSCC/PDC, HFI), sweet_smmu.c (the GPU SMMU) and sweet_cp.c (stage 4, the CP).
+ * RSCC/PDC, HFI), sweet_smmu.c (the GPU SMMU), sweet_cp.c (stage 4, the CP)
+ * and sweet_zap.c (stage 5, the zap shader).
  */
 #ifndef _SWEET_GPU_INTERNAL_H_
 #define _SWEET_GPU_INTERNAL_H_
@@ -96,6 +97,20 @@ vm_offset_t sweet_gmu_spare(uint32_t len, uint64_t *pa);       /* GPU-GMU-MEM pa
 
 /* sweet_cp.c: stage 4, CP first light; stop = sweetcp (0-6), cb = stage 3's bank, gx_gdscr = mapped GX GDSCR */
 bool sweet_cp_run(int stop, int cb, const uint8_t *sqe, uint32_t sqe_len, vm_offset_t gx_gdscr);
+/* The ring and the scratch page for stage 5, once sweet_cp_run passed 4.4 or later */
+uint32_t sweet_cp_rd(uint32_t reg);
+uint32_t sweet_cp_pkt7(uint32_t op, uint32_t cnt);
+void sweet_cp_emit(uint32_t w);
+void sweet_cp_kick(void);                                       /* dsb sy, then CP_RB_WPTR */
+int sweet_cp_wait_idle(unsigned timeout_us);                    /* us taken, or -1 */
+bool sweet_cp_marker(uint32_t val, const char *when);          /* PKT4 to CP_SCRATCH_REG(7), kick, wait */
+void sweet_cp_dump(const char *when);
+bool sweet_cp_clean(const char *when);                          /* no SMMU, CP_HW_FAULT or PROTECT change */
+void sweet_cp_halt(void);                                       /* CP_SQE_CNTL = 0 if the SQE runs */
+volatile uint32_t *sweet_cp_scratch(uint64_t *pa);              /* 4 KiB, uncached, IOVA = PA */
+
+/* sweet_zap.c: stage 5, the zap shader; stop = sweetzap (0-6) */
+bool sweet_zap_run(int stop, const uint8_t *mdt, uint32_t mdt_len, const uint8_t *b02, uint32_t b02_len);
 
 /* sweet_rpmh.c: cmd-db address of an ARC (slave 3) or BCM (slave 5) resource, and an ARC's levels */
 int sweet_rpmh_cmddb_query(const char *res, unsigned slave, uint32_t *addr, unsigned *vlvl,
