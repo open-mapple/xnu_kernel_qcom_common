@@ -429,15 +429,23 @@ sweet_gmu_mem(void)
 	return sweet_smmu_faults(gm_cb, "after attach") == 0;
 }
 
-/* len bytes of GPU-GMU-MEM after the GMU's part, uncached; 0 before 2B.1 or if it does not fit. */
+/*
+ * len bytes of GPU-GMU-MEM after the GMU's part, uncached, rounded up to 4 KiB; each call
+ * takes the next free pages (stage 3's table first, at +GMEM_USED). 0 before 2B.1 or if
+ * it does not fit.
+ */
 vm_offset_t
 sweet_gmu_spare(uint32_t len, uint64_t *pa)
 {
-	if (!gm_mem || len > gm_mem_len - GMEM_USED) {
+	static uint32_t spare_used;
+	uint32_t off = GMEM_USED + spare_used;
+	len = (len + 0xfffu) & ~0xfffu;
+	if (!gm_mem || len == 0 || off > gm_mem_len || len > gm_mem_len - off) {
 		return 0;
 	}
-	*pa = gm_mem_pa + GMEM_USED;
-	return gm_mem + GMEM_USED;
+	spare_used += len;
+	*pa = gm_mem_pa + off;
+	return gm_mem + off;
 }
 
 /*

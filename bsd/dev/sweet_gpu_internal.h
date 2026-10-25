@@ -1,7 +1,7 @@
 /*
  * Shared by the SM7150 Adreno 618 bring-up files (docs/GPU_A618_PLAN.md):
  * sweet_gpu.c (stages 0 to 2, the 2B flow), sweet_gmu.c (GMU firmware,
- * RSCC/PDC, HFI) and sweet_smmu.c (the GPU SMMU).
+ * RSCC/PDC, HFI), sweet_smmu.c (the GPU SMMU) and sweet_cp.c (stage 4, the CP).
  */
 #ifndef _SWEET_GPU_INTERNAL_H_
 #define _SWEET_GPU_INTERNAL_H_
@@ -93,6 +93,9 @@ bool sweet_gmu_hfi(void);                                                       
 bool sweet_gmu_oob_gpu(void);                                                   /* 2B.6 */
 void sweet_gmu_status(const char *when);
 vm_offset_t sweet_gmu_spare(uint32_t len, uint64_t *pa);       /* GPU-GMU-MEM past the GMU's part, after 2B.1 */
+
+/* sweet_cp.c: stage 4, CP first light; stop = sweetcp (0-6), cb = stage 3's bank, gx_gdscr = mapped GX GDSCR */
+bool sweet_cp_run(int stop, int cb, const uint8_t *sqe, uint32_t sqe_len, vm_offset_t gx_gdscr);
 
 /* sweet_rpmh.c: cmd-db address of an ARC (slave 3) or BCM (slave 5) resource, and an ARC's levels */
 int sweet_rpmh_cmddb_query(const char *res, unsigned slave, uint32_t *addr, unsigned *vlvl,

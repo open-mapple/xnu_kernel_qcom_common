@@ -79,6 +79,10 @@
  * 0x80000000..0x1ffffffff 1:1 in 1 GiB blocks. ATOS is off on this SMMU and
  * the GPU sends nothing yet, so the test is the readback and fault-free
  * banks for 30 s; stage 4's first CP fetch is the first walk.
+ * Stage 4 (sweetgpu=6, after stage 3) is CP first light in sweet_cp.c:
+ * sweetcp=N (0-6) stops after step 4.N, from reads only (0) through the init
+ * list, the ring registers, the SQE start, CP_ME_INIT and register-write
+ * markers to a 30 s hold with the SQE running (6).
  * GMU and cx_misc offsets come from the generated sweet_gpu_regs.h; GCC and
  * gpucc offsets from the downstream drivers above. Everything stays on after
  * the last stage that runs.
@@ -242,7 +246,7 @@ static struct {
 	const uint8_t *va;
 } gpu_blobs[BLOB_COUNT];
 
-static int gpu_level, gpu_hang, gpu_gmu_stop, gpu_gmu_rsc;
+static int gpu_level, gpu_hang, gpu_gmu_stop, gpu_gmu_rsc, gpu_cp_stop;
 static uint32_t gpu_delay_s = SWEET_GPU_DELAY_S;
 static int gpu_sleep_chan;
 
@@ -1134,11 +1138,11 @@ gpu_stage2b(vm_offset_t gcc, vm_offset_t cc, vm_offset_t gmu, int bin)
 #define A6XX_RBBM_STATUS3_SMMU_STALLED  (1u << 24)
 
 static bool
-gpu_stage3(vm_offset_t gpu)
+gpu_stage3(vm_offset_t gpu, int *cbp)
 {
 	static const uint32_t sids[] = { GPU_SMMU_SID };
-	printf("SWEET GPU: stage 3 (sweetgpu=5): SMMU bank %d for GPU stream %u, %#llx..%#llx 1:1\n", GPU_SMMU_BANK,
-	    GPU_SMMU_SID, GPU_IDMAP_START, GPU_IDMAP_END - 1u);
+	printf("SWEET GPU: stage 3 (sweetgpu=%d): SMMU bank %d for GPU stream %u, %#llx..%#llx 1:1\n", gpu_level,
+	    GPU_SMMU_BANK, GPU_SMMU_SID, GPU_IDMAP_START, GPU_IDMAP_END - 1u);
 	uint64_t pa = 0;
 	vm_offset_t va = sweet_gmu_spare(GPU_SMMU_PT_SIZE, &pa);
 	if (!va) {
@@ -1155,6 +1159,7 @@ gpu_stage3(vm_offset_t gpu)
 	if (cb < 0) {
 		return false;
 	}
+	*cbp = cb;
 	bool ok = sweet_smmu_faults(cb, "stage 3 after attach") == 0;
 	uint32_t st3 = gpu_rd(gpu, REG_A6XX_RBBM_STATUS3 * 4u);
 	printf("SWEET GPU:   RBBM_STATUS 0x%08x RBBM_STATUS3 0x%08x (%s)\n", gpu_rd(gpu, REG_A6XX_RBBM_STATUS * 4u), st3,
@@ -1185,8 +1190,8 @@ gpu_thread(void *arg, wait_result_t result)
 	}
 	printf("SWEET GPU: stage 0 (sweetgpu=%d): firmware blobs, cmd-db, speed bin; no GPU registers\n",
 	    gpu_level);
-	if (gpu_level > 5) {
-		printf("SWEET GPU: stages above 3 are not built yet; running stages 0, 1, 2B and 3\n");
+	if (gpu_level > 6) {
+		printf("SWEET GPU: stages above 4 are not built yet; running stages 0 to 4\n");
 	}
 	unsigned found = gpu_find_blobs();
 	gpu_check_blobs();
@@ -1203,7 +1208,11 @@ gpu_thread(void *arg, wait_result_t result)
 			if (gpu_gmu_stop != 6) {
 				printf("SWEET GPU: stage 3 needs all of 2B (sweetgmu=6); not run\n");
 			} else if (gpu) {
-				(void)gpu_stage3(gpu);
+				int cb = -1;
+				if (gpu_stage3(gpu, &cb) && gpu_level >= 6) {
+					(void)sweet_cp_run(gpu_cp_stop, cb, gpu_blobs[BLOB_SQE].va, gpu_blobs[BLOB_SQE].len,
+					    cc + GPUCC_GX_GDSCR);
+				}
 			}
 		}
 	}
@@ -1233,6 +1242,10 @@ sweet_gpu_init(void)
 		gpu_gmu_stop = 0;
 	}
 	(void)PE_parse_boot_argn("sweetgmursc", &gpu_gmu_rsc, sizeof(gpu_gmu_rsc));
+	(void)PE_parse_boot_argn("sweetcp", &gpu_cp_stop, sizeof(gpu_cp_stop));
+	if (gpu_cp_stop < 0 || gpu_cp_stop > 6) {
+		gpu_cp_stop = 0;
+	}
 	thread_t thread;
 	if (kernel_thread_start(gpu_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
