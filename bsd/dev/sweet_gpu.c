@@ -88,6 +88,10 @@
  * sweet_zap.c: sweetzap=N (0-6) stops after step 5.N, from read-only SCM
  * queries (0) through TrustZone loading the zap (3), CP_SET_SECURE_MODE 0 (4)
  * and the GPU's first writes to DRAM (5) to a 30 s hold (6).
+ * Stage 6 (sweetgpu=8, after stage 5 with sweetzap >= 5) is the kernel GPU
+ * service in sweet_gsvc.c: sweetsvc=N (0-7) stops after step 6.N, from reads
+ * only (0) through CP_PROTECT, fences, IBs and the GPU VA window, the
+ * self-test, the hang detector and DCVS to "service ready" and a 60 s hold (7).
  * GMU and cx_misc offsets come from the generated sweet_gpu_regs.h; GCC and
  * gpucc offsets from the downstream drivers above. Everything stays on after
  * the last stage that runs.
@@ -251,7 +255,9 @@ static struct {
 	const uint8_t *va;
 } gpu_blobs[BLOB_COUNT];
 
-static int gpu_level, gpu_hang, gpu_gmu_stop, gpu_gmu_rsc, gpu_cp_stop, gpu_zap_stop;
+static int gpu_level, gpu_hang, gpu_gmu_stop, gpu_gmu_rsc, gpu_cp_stop, gpu_zap_stop, gpu_svc_stop;
+static vm_offset_t gpu_meas_gcc, gpu_meas_cc, gpu_l1_va;       /* for stage 6 */
+static uint64_t gpu_l1_pa;
 static uint32_t gpu_delay_s = SWEET_GPU_DELAY_S;
 static int gpu_sleep_chan;
 
@@ -860,6 +866,16 @@ gpu_measure_khz(vm_offset_t gcc, vm_offset_t cc, uint32_t sel)
 	return (uint32_t)(hz * GCC_DEBUG_DIV * GPUCC_DEBUG_DIV / 1000u);
 }
 
+/* Stage 6.6: gx_gfx3d now, in kHz (0 stopped, MEAS_FAILED if not measurable) */
+uint32_t
+sweet_gpu_gfx3d_khz(void)
+{
+	if (!gpu_meas_gcc || !gpu_meas_cc) {
+		return MEAS_FAILED;
+	}
+	return gpu_measure_khz(gpu_meas_gcc, gpu_meas_cc, 0x0c);
+}
+
 struct gpu_meas {
 	const char *name;
 	uint32_t sel;           /* gpucc debug mux input */
@@ -1165,6 +1181,8 @@ gpu_stage3(vm_offset_t gpu, int *cbp)
 		return false;
 	}
 	*cbp = cb;
+	gpu_l1_va = va;
+	gpu_l1_pa = pa;
 	bool ok = sweet_smmu_faults(cb, "stage 3 after attach") == 0;
 	uint32_t st3 = gpu_rd(gpu, REG_A6XX_RBBM_STATUS3 * 4u);
 	printf("SWEET GPU:   RBBM_STATUS 0x%08x RBBM_STATUS3 0x%08x (%s)\n", gpu_rd(gpu, REG_A6XX_RBBM_STATUS * 4u), st3,
@@ -1195,8 +1213,8 @@ gpu_thread(void *arg, wait_result_t result)
 	}
 	printf("SWEET GPU: stage 0 (sweetgpu=%d): firmware blobs, cmd-db, speed bin; no GPU registers\n",
 	    gpu_level);
-	if (gpu_level > 7) {
-		printf("SWEET GPU: stages above 5 are not built yet; running stages 0 to 5\n");
+	if (gpu_level > 8) {
+		printf("SWEET GPU: stages above 6 are not built yet; running stages 0 to 6\n");
 	}
 	unsigned found = gpu_find_blobs();
 	gpu_check_blobs();
@@ -1210,6 +1228,8 @@ gpu_thread(void *arg, wait_result_t result)
 			gpu_stage2a(gcc, cc, gmu);
 		} else if (gpu_level >= 4 && gpu_stage2b(gcc, cc, gmu, bin) && gpu_level >= 5) {
 			vm_offset_t gpu = ml_io_map(GPU_PA, GPU_REGS_SIZE);
+			gpu_meas_gcc = gcc;
+			gpu_meas_cc = cc;
 			if (gpu_gmu_stop != 6) {
 				printf("SWEET GPU: stage 3 needs all of 2B (sweetgmu=6); not run\n");
 			} else if (gpu) {
@@ -1219,10 +1239,14 @@ gpu_thread(void *arg, wait_result_t result)
 				    cc + GPUCC_GX_GDSCR) && gpu_level >= 7) {
 					if (gpu_cp_stop < 5) {
 						printf("SWEET GPU: stage 5 needs stage 4 through 4.5 (sweetcp=5 or 6); not run\n");
-					} else {
-						(void)sweet_zap_run(gpu_zap_stop, gpu_blobs[BLOB_ZAP_MDT].va,
-						    gpu_blobs[BLOB_ZAP_MDT].len, gpu_blobs[BLOB_ZAP_B02].va,
-						    gpu_blobs[BLOB_ZAP_B02].len);
+					} else if (sweet_zap_run(gpu_zap_stop, gpu_blobs[BLOB_ZAP_MDT].va,
+					    gpu_blobs[BLOB_ZAP_MDT].len, gpu_blobs[BLOB_ZAP_B02].va,
+					    gpu_blobs[BLOB_ZAP_B02].len) && gpu_level >= 8) {
+						if (gpu_zap_stop < 5) {
+							printf("SWEET GPU: stage 6 needs stage 5 through 5.5 (sweetzap=5 or 6); not run\n");
+						} else {
+							(void)sweet_gsvc_run(gpu_svc_stop, cb, gpu_l1_va, gpu_l1_pa);
+						}
 					}
 				}
 			}
@@ -1261,6 +1285,10 @@ sweet_gpu_init(void)
 	(void)PE_parse_boot_argn("sweetzap", &gpu_zap_stop, sizeof(gpu_zap_stop));
 	if (gpu_zap_stop < 0 || gpu_zap_stop > 6) {
 		gpu_zap_stop = 0;
+	}
+	(void)PE_parse_boot_argn("sweetsvc", &gpu_svc_stop, sizeof(gpu_svc_stop));
+	if (gpu_svc_stop < 0 || gpu_svc_stop > 7) {
+		gpu_svc_stop = 0;
 	}
 	thread_t thread;
 	if (kernel_thread_start(gpu_thread, NULL, &thread) == KERN_SUCCESS) {

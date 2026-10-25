@@ -1,8 +1,9 @@
 /*
  * Shared by the SM7150 Adreno 618 bring-up files (docs/GPU_A618_PLAN.md):
  * sweet_gpu.c (stages 0 to 2, the 2B flow), sweet_gmu.c (GMU firmware,
- * RSCC/PDC, HFI), sweet_smmu.c (the GPU SMMU), sweet_cp.c (stage 4, the CP)
- * and sweet_zap.c (stage 5, the zap shader).
+ * RSCC/PDC, HFI), sweet_smmu.c (the GPU SMMU), sweet_cp.c (stage 4, the CP),
+ * sweet_zap.c (stage 5, the zap shader) and sweet_gsvc.c (stage 6, the
+ * kernel GPU service).
  */
 #ifndef _SWEET_GPU_INTERNAL_H_
 #define _SWEET_GPU_INTERNAL_H_
@@ -97,9 +98,12 @@ vm_offset_t sweet_gmu_spare(uint32_t len, uint64_t *pa);       /* GPU-GMU-MEM pa
 
 /* sweet_cp.c: stage 4, CP first light; stop = sweetcp (0-6), cb = stage 3's bank, gx_gdscr = mapped GX GDSCR */
 bool sweet_cp_run(int stop, int cb, const uint8_t *sqe, uint32_t sqe_len, vm_offset_t gx_gdscr);
-/* The ring and the scratch page for stage 5, once sweet_cp_run passed 4.4 or later */
+/* The ring and the scratch page for stages 5 and 6, once sweet_cp_run passed 4.4 or later */
 uint32_t sweet_cp_rd(uint32_t reg);
+void sweet_cp_wr(uint32_t reg, uint32_t val);
+uint32_t sweet_cp_pkt4(uint32_t reg, uint32_t cnt);
 uint32_t sweet_cp_pkt7(uint32_t op, uint32_t cnt);
+uint32_t sweet_cp_ring_free(void);                              /* dwords that can be emitted now */
 void sweet_cp_emit(uint32_t w);
 void sweet_cp_kick(void);                                       /* dsb sy, then CP_RB_WPTR */
 int sweet_cp_wait_idle(unsigned timeout_us);                    /* us taken, or -1 */
@@ -111,6 +115,33 @@ volatile uint32_t *sweet_cp_scratch(uint64_t *pa);              /* 4 KiB, uncach
 
 /* sweet_zap.c: stage 5, the zap shader; stop = sweetzap (0-6) */
 bool sweet_zap_run(int stop, const uint8_t *mdt, uint32_t mdt_len, const uint8_t *b02, uint32_t b02_len);
+
+/* Stage 6 helpers: GMU DCVS perf index (sweet_gmu.c), bank TLB invalidate (sweet_smmu.c), measured gx_gfx3d */
+bool sweet_gmu_dcvs(unsigned index, uint32_t *ret);
+bool sweet_smmu_tlbiall(int cb);
+uint32_t sweet_gpu_gfx3d_khz(void);                             /* 0xffffffff if not measurable */
+
+/* sweet_gsvc.c: stage 6, the kernel GPU service; stop = sweetsvc (0-7), l1 = stage 3's level-1 table */
+bool sweet_gsvc_run(int stop, int cb, vm_offset_t l1_va, uint64_t l1_pa);
+
+/* The C API patch 0112's user client wraps; errno values, ENXIO once the service is dead */
+struct sweet_gsvc_ib {
+	uint32_t handle, offset, size_dw;       /* offset in bytes, dword aligned */
+};
+#define SWEET_GSVC_READY        1u
+#define SWEET_GSVC_DEAD         2u
+struct sweet_gsvc_info {
+	uint32_t chip_id, gmem_size, gmem_base;
+	uint32_t cur_khz, max_khz, last_retired, flags;
+	uint64_t fence_pa, window_base, window_size;
+};
+int sweet_gsvc_bo_new(uint32_t size, uint32_t flags, uint32_t *handle, uint64_t *gpu_va, volatile uint32_t **cpu);
+int sweet_gsvc_bo_import_pages(const uint64_t *pa, uint32_t npages, uint32_t *handle, uint64_t *gpu_va);
+int sweet_gsvc_bo_free(uint32_t handle);
+int sweet_gsvc_bo_sync(uint32_t handle);
+int sweet_gsvc_submit(const struct sweet_gsvc_ib *ibs, unsigned n, uint32_t *seq);
+int sweet_gsvc_wait(uint32_t seq, uint32_t timeout_ms);
+void sweet_gsvc_info(struct sweet_gsvc_info *info);
 
 /* sweet_rpmh.c: cmd-db address of an ARC (slave 3) or BCM (slave 5) resource, and an ARC's levels */
 int sweet_rpmh_cmddb_query(const char *res, unsigned slave, uint32_t *addr, unsigned *vlvl,

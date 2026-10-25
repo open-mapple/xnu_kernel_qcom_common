@@ -476,6 +476,18 @@ sweet_smmu_attach(const uint32_t *sids, unsigned nsid, uint64_t ttbr, unsigned i
 	return bank;
 }
 
+/* Stage 6: drop the bank's cached walks after a table change; false if TLBSYNC does not complete */
+bool
+sweet_smmu_tlbiall(int cb)
+{
+	if (cb < 0) {
+		return false;
+	}
+	vm_offset_t base = smmu_cb((unsigned)cb);
+	gpu_wr(base, CB_TLBIALL, 0);
+	return smmu_tlb_sync(base, CB_TLBSYNC, CB_TLBSTATUS);
+}
+
 /* Logs the global and (cb >= 0) the bank's fault registers; returns sGFSR | FSR fault bits, 0 if clean. */
 uint32_t
 sweet_smmu_faults(int cb, const char *when)

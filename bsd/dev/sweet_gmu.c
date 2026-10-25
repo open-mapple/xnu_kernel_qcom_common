@@ -1025,4 +1025,17 @@ sweet_gmu_oob_gpu(void)
 	sweet_gmu_status("after OOB_GPU and DCVS");
 	return ok;
 }
+
+/* Stage 6.6: the 2B.6 DCVS vote with another perf index; ret = DCVS_RETURN (0 when the GMU accepted it) */
+bool
+sweet_gmu_dcvs(unsigned index, uint32_t *ret)
+{
+	bool ok = gmu_set("DCVS_ACK_OPTION", REG_A6XX_GMU_DCVS_ACK_OPTION, 0);
+	ok = gmu_set("DCVS_PERF_SETTING", REG_A6XX_GMU_DCVS_PERF_SETTING, 0x30000000u | index) && ok;
+	ok = gmu_set("DCVS_BW_SETTING", REG_A6XX_GMU_DCVS_BW_SETTING, DCVS_BW_NO_CHANGE) && ok;
+	ok = ok && gmu_oob_set(OOB_DCVS, "dcvs");
+	*ret = gmu_rd(gm_gmu, REG_A6XX_GMU_DCVS_RETURN);
+	gmu_wr(gm_gmu, REG_A6XX_GMU_HOST2GMU_INTR_SET, 1u << (OOB_DCVS + 24u));   /* oob_clear */
+	return ok;
+}
 #endif /* ARM64_BOARD_CONFIG_SWEET */

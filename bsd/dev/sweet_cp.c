@@ -629,17 +629,37 @@ sweet_cp_run(int stop, int cb, const uint8_t *sqe, uint32_t sqe_len, vm_offset_t
 	return ok;
 }
 
-/* For stage 5, after sweet_cp_run passed 4.4 or later */
+/* For stages 5 and 6, after sweet_cp_run passed 4.4 or later */
 uint32_t
 sweet_cp_rd(uint32_t reg)
 {
 	return cp_rd(reg);
 }
 
+void
+sweet_cp_wr(uint32_t reg, uint32_t val)
+{
+	cp_wr(reg, val);
+}
+
+uint32_t
+sweet_cp_pkt4(uint32_t reg, uint32_t cnt)
+{
+	return pkt4(reg, cnt);
+}
+
 uint32_t
 sweet_cp_pkt7(uint32_t op, uint32_t cnt)
 {
 	return pkt7(op, cnt);
+}
+
+/* Ring dwords free to emit; RPTR from the register, one slot kept empty */
+uint32_t
+sweet_cp_ring_free(void)
+{
+	uint32_t rptr = cp_rd(REG_A6XX_CP_RB_RPTR) % CP_RING_DWORDS;
+	return (rptr + CP_RING_DWORDS - cp_wptr - 1u) % CP_RING_DWORDS;
 }
 
 void

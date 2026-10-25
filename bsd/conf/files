@@ -117,6 +117,7 @@ bsd/dev/sweet_gmu.c			standard
 bsd/dev/sweet_smmu.c			standard
 bsd/dev/sweet_cp.c			standard
 bsd/dev/sweet_zap.c			standard
+bsd/dev/sweet_gsvc.c			standard
 bsd/dev/mem.c				standard
 bsd/dev/munge.c 			optional config_requires_u32_munging
 bsd/dev/unix_startup.c			standard
