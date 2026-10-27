@@ -704,6 +704,17 @@ sweet_cp_halt(void)
 	cp_halt();
 }
 
+/* cp_halt without the gpu_pause, for a service that is stopping on an error */
+void
+sweet_cp_halt_now(void)
+{
+	if (cp_sqe_on) {
+		cp_wr(REG_A6XX_CP_SQE_CNTL, 0);
+		cp_sqe_on = false;
+		printf("SWEET CP:   SQE halted at once; CP_SQE_CNTL now 0x%x\n", cp_rd(REG_A6XX_CP_SQE_CNTL));
+	}
+}
+
 volatile uint32_t *
 sweet_cp_scratch(uint64_t *pa)
 {

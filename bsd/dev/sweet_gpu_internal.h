@@ -111,6 +111,7 @@ bool sweet_cp_marker(uint32_t val, const char *when);          /* PKT4 to CP_SCR
 void sweet_cp_dump(const char *when);
 bool sweet_cp_clean(const char *when);                          /* no SMMU, CP_HW_FAULT or PROTECT change */
 void sweet_cp_halt(void);                                       /* CP_SQE_CNTL = 0 if the SQE runs */
+void sweet_cp_halt_now(void);                                   /* the same, without the pause */
 volatile uint32_t *sweet_cp_scratch(uint64_t *pa);              /* 4 KiB, uncached, IOVA = PA */
 
 /* sweet_zap.c: stage 5, the zap shader; stop = sweetzap (0-6) */
