@@ -62,7 +62,13 @@
 
 extern vm_offset_t virtual_space_start;     /* Next available kernel VA */
 
-#define IO_MAP_SIZE            (8ul << 20)
+/*
+ * fajita: 8 MiB was the ceiling for every ml_io_map() in the kernel (each one comes out of this
+ * submap, with KMS_NOFAIL - a full submap panics). The GPU arena alone wants tens of MiB: a 16 MiB,
+ * a 40 MiB and even a series of 1 MiB mappings all died here while vm_allocate() could still hand
+ * out 64 MiB, which is what finally identified this constant. 256 MiB of address space, not RAM.
+ */
+#define IO_MAP_SIZE            (256ul << 20)
 
 __startup_data static struct mach_vm_range io_range;
 static SECURITY_READ_ONLY_LATE(vm_map_t) io_submap;
