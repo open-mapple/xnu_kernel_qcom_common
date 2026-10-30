@@ -299,6 +299,10 @@ LEXT(sweet_secondary_entry)
 	msr		VBAR_EL2, x1
 	/* No stage 2, AArch64 EL1, no EL2 interrupt or FP/debug traps. */
 	mov		x1, #(1 << 31)
+#if HAS_NATIVE_PAC
+	/* arm64e (patch 0115): HCR_EL2.API/APK, no PAC instruction or key register traps. */
+	orr		x1, x1, #(3 << 40)
+#endif
 	msr		HCR_EL2, x1
 	msr		VTTBR_EL2, xzr
 	msr		CPTR_EL2, xzr
@@ -991,6 +995,15 @@ arm_init_tramp:
 
 	/* Return to arm_init() */
 	ret
+
+#if HAS_NATIVE_PAC
+/* FUXI arm64e (patch 0115): PAC_INIT_KEY_STATE key set and status words (layout in arm64/pac_asm.h). */
+	.section __DATA, __data
+	.align 6
+	.globl EXT(fuxi_native_pac)
+LEXT(fuxi_native_pac)
+	.space	NATIVE_PAC_WORDS * 8, 0
+#endif /* HAS_NATIVE_PAC */
 
 //#include	"globals_asm.h"
 

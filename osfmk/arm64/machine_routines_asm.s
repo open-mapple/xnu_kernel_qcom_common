@@ -93,6 +93,11 @@ Lcre_start_\@:
 	.align 2
 	.globl EXT(ml_enable_user_jop_key)
 LEXT(ml_enable_user_jop_key)
+#if HAS_NATIVE_PAC
+	/* FUXI arm64e (patch 0115, after UniXNU native-pac-keys): one key set for the kernel and every process. */
+	mov		x0, #0
+	ret
+#endif /* HAS_NATIVE_PAC */
 #if HAS_PARAVIRTUALIZED_PAC
 	mov 	x2, x0
 	MOV64	x0, VMAPPLE_PAC_SET_EL0_DIVERSIFIER_AT_EL1
@@ -108,6 +113,9 @@ LEXT(ml_enable_user_jop_key)
 	.align 2
 	.globl EXT(ml_disable_user_jop_key)
 LEXT(ml_disable_user_jop_key)
+#if HAS_NATIVE_PAC
+	ret
+#endif /* HAS_NATIVE_PAC */
 #if HAS_PARAVIRTUALIZED_PAC
 	mov 	x2, x1
 	MOV64	x0, VMAPPLE_PAC_SET_EL0_DIVERSIFIER_AT_EL1
