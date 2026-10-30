@@ -260,6 +260,7 @@ extern unsigned int gFastIPI;
 
 #if defined(FUXI)
 extern void fuxi_idle_sgi(unsigned int intid);	/* osfmk/arm64/fuxi_idle.c (patch 0105) */
+extern int fuxi_pac_trap(uint64_t pc, uint32_t esr);	/* osfmk/arm64/fuxi_pac.c (patch 0114) */
 #endif
 
 static arm_saved_state64_t *original_faulting_state = NULL;
@@ -618,6 +619,15 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 #endif /* CONFIG_XNUPOST */
 
 	ASSERT_CONTEXT_SANITY(context);
+
+#if defined(FUXI)
+	/* fuxigpuncimport bit 25: a trapping PAC probe instruction (UNDEF, FPAC) is skipped, never anything else. */
+	if (PSR64_IS_KERNEL(get_saved_state_cpsr(state)) &&
+	    fuxi_pac_trap((uint64_t)get_saved_state_pc(state), esr)) {
+		add_saved_state_pc(state, 4);
+		return;
+	}
+#endif
 
 	task_vtimer_check(thread);
 
