@@ -1317,6 +1317,13 @@ grade:
 	} else {
 		imgp->ip_flags |= IMGPF_NOJOP;
 	}
+#if defined(FUXI) && defined(__arm64e__)
+	/* FUXI arm64e (patch 0116): the only processes whose user pointers the kernel authenticates. */
+	if (!(imgp->ip_flags & IMGPF_NOJOP)) {
+		printf("FUXI ARM64E: exec %s arm64e slice cpusub=0x%x user_jop=1\n",
+		    (imgp->ip_vp && imgp->ip_vp->v_name) ? imgp->ip_vp->v_name : "?", (unsigned)mach_header->cpusubtype);
+	}
+#endif
 #endif
 
 	/* Copy in arguments/environment from the old process */
