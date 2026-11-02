@@ -1780,6 +1780,17 @@ proc_handle_critical_exit(proc_t p, int rv)
 		return;
 	}
 
+	/*
+	 * fajita: only launchd itself takes the machine down. A boot task that exits non-zero - /sbin/mount
+	 * with an fstab line it cannot satisfy, for instance - has to be reported and survived: otherwise
+	 * every experiment with a bad mount entry costs a whole boot cycle.
+	 */
+	if (p != initproc) {
+		printf("SWEET: %s[%d] exited with status %d (signal %d); not panicking\n",
+		    p->p_name, proc_getpid(p), WEXITSTATUS(rv), WTERMSIG(rv));
+		return;
+	}
+
 #if DEVELOPMENT
 	if (crash_behavior_test_mode) {
 		crash_behavior_test_would_panic = TRUE;
