@@ -55,6 +55,7 @@ extern void sweet_touch_init(void);
 extern void sweet_cpufreq_init(void);
 extern void sweet_gpu_init(void);
 extern void sweet_usb_probe(void);
+extern void sweet_wifi_probe(void);
 
 #define REG_CAP         0x00
 #define REG_IS          0x20
@@ -680,6 +681,7 @@ sweet_ufs_init(void)
 	sweet_cpufreq_init();
 	sweet_gpu_init();
 	sweet_usb_probe();
+	sweet_wifi_probe();
 	return 0;
 }
 
