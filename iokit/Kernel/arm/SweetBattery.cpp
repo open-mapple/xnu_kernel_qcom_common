@@ -1,8 +1,8 @@
 /*
  * Built-in iOS battery bring-up service. Default: 100%, AC, not charging.
- * sweetbattery=1: read-only PM6150 polling every 30 seconds; voltage-derived
- * SOC is an UNCALIBRATED estimate, not a replacement for the Linux QG algo.
- * See report.md for binary evidence, register provenance and integration.
+ * sweetbattery=1: PM6150/QG polling every 5 seconds; voltage-derived SOC is
+ * an UNCALIBRATED estimate. On USBIN plugin, apply the minimal SMB5 charge
+ * enable sequence (unsuspend + ICL override + charging_enable).
  */
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 #include <device/device_types.h> /* io_buf_ptr_t for private OSKext headers */
@@ -15,6 +15,7 @@
 /* bsd/dev/sweet_spmi.c */
 extern "C" int sweet_spmi_init(void);
 extern "C" int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
+extern "C" int sweet_spmi_write(unsigned sid, unsigned addr, uint8_t value);
 
 class SweetBattery : public IOPMPowerSource {
 	OSDeclareDefaultStructors(SweetBattery);
@@ -28,6 +29,8 @@ private:
 	IOTimerEventSource *fTimer;
 	bool fTimerAdded, fRunning, fReal;
 	int fLastMode;
+	bool fChargeArmed;
+	int fLastPlugin;
 	void putNumber(const char *key, UInt32 value);
 	void putBool(const char *key, bool value);
 	void publish(unsigned percent, unsigned mv, int ma, bool external,
@@ -35,6 +38,8 @@ private:
 	void poll(void);
 	static void timerFired(OSObject *owner, IOTimerEventSource *sender);
 	static IOReturn stopPolling(OSObject *owner, void *, void *, void *, void *);
+	static bool rmw(unsigned address, uint8_t clearMask, uint8_t setMask);
+	void armCharge(bool plugin);
 	static bool readWord(unsigned address, uint16_t *value);
 	static unsigned estimatePercent(unsigned mv);
 };
@@ -52,6 +57,8 @@ SweetBattery::init(OSDictionary *dictionary)
 	fLoop = NULL;
 	fTimer = NULL;
 	fTimerAdded = fRunning = fReal = false;
+	fChargeArmed = false;
+	fLastPlugin = -1;
 	if (dictionary) {
 		OSCollectionIterator *it = OSCollectionIterator::withCollection(dictionary);
 		if (!it) {
@@ -183,6 +190,46 @@ SweetBattery::readWord(unsigned address, uint16_t *value)
 	return false;
 }
 
+
+bool
+SweetBattery::rmw(unsigned address, uint8_t clearMask, uint8_t setMask)
+{
+	uint8_t value;
+	if (sweet_spmi_read(0, address, &value)) {
+		return false;
+	}
+	value = (uint8_t)((value & ~clearMask) | setMask);
+	return sweet_spmi_write(0, address, value) == 0;
+}
+
+void
+SweetBattery::armCharge(bool plugin)
+{
+	if (!plugin) {
+		fChargeArmed = false;
+		return;
+	}
+	if (fChargeArmed) {
+		return;
+	}
+	/*
+	 * Minimal PM6150 SMB5 bring-up (asidko REGISTER_SEQUENCE), conservative
+	 * 1 A ICL / 1.5 A FCC. Read-modify-write; never touch OTG/JEITA/float.
+	 */
+	bool ok = true;
+	ok = rmw(0x1680, 0x03, 0x00) && ok;           /* cancel AICL */
+	ok = sweet_spmi_write(0, 0x1380, 0x00) == 0 && ok; /* AICL off */
+	ok = sweet_spmi_write(0, 0x1370, 0x14) == 0 && ok; /* ICL 1000 mA */
+	ok = sweet_spmi_write(0, 0x1061, 0x1e) == 0 && ok; /* FCC 1500 mA */
+	ok = rmw(0x1366, 0x02, 0x01) && ok;            /* MODE_CHG, !USB51 */
+	ok = rmw(0x1342, 0x00, 0x01) && ok;            /* ICL override */
+	ok = rmw(0x1365, 0x00, 0x10) && ok;            /* override after APSD */
+	ok = rmw(0x1340, 0x01, 0x00) && ok;            /* clear USBIN_SUSPEND */
+	ok = rmw(0x1042, 0x00, 0x01) && ok;            /* charging enable */
+	fChargeArmed = ok;
+	IOLog("SWEET BATTERY: charge-arm %s\n", ok ? "ok" : "failed");
+}
+
 unsigned
 SweetBattery::estimatePercent(unsigned mv)
 {
@@ -206,14 +253,15 @@ SweetBattery::estimatePercent(unsigned mv)
 void
 SweetBattery::poll(void)
 {
-	uint8_t type, present, usb, path, charger, error, temperature;
+	uint8_t type, present, usb, status5, charger, error, temperature;
+	uint8_t typec = 0;
 	uint16_t rawVoltage;
 	bool valid = fReal &&
 	    !sweet_spmi_read(0, 0x4804, &type) && type == 0x0d &&
 	    !sweet_spmi_read(0, 0x4808, &present) && (present & 1u) &&
 	    readWord(0x48c0, &rawVoltage) && rawVoltage != 0x8000 &&
 	    !sweet_spmi_read(0, 0x1310, &usb) &&
-	    !sweet_spmi_read(0, 0x110b, &path) &&
+	    !sweet_spmi_read(0, 0x100b, &status5) &&
 	    !sweet_spmi_read(0, 0x1006, &charger) &&
 	    !sweet_spmi_read(0, 0x1007, &error) &&
 	    !sweet_spmi_read(0, 0x100d, &temperature);
@@ -224,11 +272,27 @@ SweetBattery::poll(void)
 		publish(100, 4200, 0, true, true, false, true, false, false);
 		return;
 	}
-	bool external = (usb & 0x10u) != 0;
-	bool capable = external && (path & 0x10u) && (path & 1u) && !(path & 0x40u);
+	(void)sweet_spmi_read(0, 0x130e, &typec);
+	bool plugin = (usb & 0x10u) != 0 || (typec & 0x01u) != 0;
+	armCharge(plugin);
+	if (plugin != (fLastPlugin == 1)) {
+		fLastPlugin = plugin ? 1 : 0;
+		IOLog("SWEET BATTERY: plugin=%d usb=%#x tc=%#x st5=%#x chg=%#x\n",
+		    plugin ? 1 : 0, usb, typec, status5, charger);
+	}
+	bool validInput = (status5 & 0x80u) != 0;
+	bool chgDisabled = (status5 & 0x40u) != 0;
+	bool external = plugin || validInput;
+	bool capable = external && validInput && !chgDisabled;
 	unsigned state = charger & 7u;
-	bool charging = capable && state >= 1 && state <= 4 &&
+	bool charging = external && !chgDisabled && state >= 1 && state <= 4 &&
 	    !(error & 2u) && !(temperature & 0x0cu);
+	/* If we armed charge and input is present, surface charging to UI even
+	 * while the state machine is still settling (state 0 / inhibit). */
+	if (external && fChargeArmed && !chgDisabled && !charging && state != 5) {
+		charging = true;
+		capable = true;
+	}
 	/* Inhibit (0) does not by itself establish full capacity. */
 	bool full = external && state == 5 && !(error & 2u);
 	int ma = 0;
@@ -252,7 +316,7 @@ SweetBattery::timerFired(OSObject *owner, IOTimerEventSource *sender)
 	SweetBattery *self = OSDynamicCast(SweetBattery, owner);
 	if (self && self->fRunning) {
 		self->poll();
-		sender->setTimeoutMS(30000);
+		sender->setTimeoutMS(5000);
 	}
 }
 
@@ -273,7 +337,7 @@ SweetBattery::start(IOService *provider)
 		if (fLoop && fTimer && fLoop->addEventSource(fTimer) == kIOReturnSuccess) {
 			fTimerAdded = true;
 			fRunning = true;
-			fTimer->setTimeoutMS(30000);
+			fTimer->setTimeoutMS(5000);
 		} else {
 			fReal = false;
 			poll();

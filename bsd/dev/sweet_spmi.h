@@ -8,6 +8,8 @@ extern "C" {
 int sweet_spmi_init(void);
 /* Thread context only; 0 success, -1 failure; *out unchanged on failure. */
 int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
+/* One-byte EXT_WRITEL on the EE0 channel; charger bring-up only. */
+int sweet_spmi_write(unsigned sid, unsigned addr, uint8_t value);
 #ifdef __cplusplus
 }
 #endif
