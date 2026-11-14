@@ -606,9 +606,10 @@ sweet_ufs_init(void)
 	PE_parse_boot_argn("ufsroot", want, sizeof(want));
 	uint32_t rw = 0;
 	PE_parse_boot_argn("ufsrw", &rw, sizeof(rw));
-	uint32_t cache = 0, wait = 0;
+	uint32_t cache = 0, wait = 0, wake = 0;
 	PE_parse_boot_argn("ufscache", &cache, sizeof(cache));
 	PE_parse_boot_argn("ufswait", &wait, sizeof(wait));
+	PE_parse_boot_argn("ufswake", &wake, sizeof(wake));
 	su.cache = (cache == 1);
 	su.wait = (wait == 1);
 
@@ -628,7 +629,7 @@ sweet_ufs_init(void)
 
 	lck_mtx_lock(&sweet_ufs_lock);
 	error = ufs_take_over_host();
-	if (!error) {
+	if (!error && wake == 1) {
 		/*
 		 * The Pixel 4a (sunfish) bootloader hands over with the device powered
 		 * down: every command answers NOT READY. Like Linux ufshcd at init, ask
