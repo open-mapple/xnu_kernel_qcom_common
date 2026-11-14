@@ -90,6 +90,11 @@ const char * gIOKernelConfigTables =
     "     'IOProviderClass' = IOResources;"
     "     'IOMatchCategory' = SweetBattery;"
     "   },"
+    "   {"
+    "     'IOClass'         = SweetGPU;"
+    "     'IOProviderClass' = IOResources;"
+    "     'IOMatchCategory' = SweetGPU;"
+    "   },"
 #endif
     "   {"
     "     'IOClass'         = IOPanicPlatform;"
