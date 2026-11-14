@@ -59,27 +59,41 @@
 #include <vm/vm_map.h>
 #include <arm/pmap.h>
 #include <san/kasan.h>
+#include <pexpert/pexpert.h>
 
 extern vm_offset_t virtual_space_start;     /* Next available kernel VA */
 
-/*
- * fajita: 8 MiB was the ceiling for every ml_io_map() in the kernel (each one comes out of this
- * submap, with KMS_NOFAIL - a full submap panics). The GPU arena alone wants tens of MiB: a 16 MiB,
- * a 40 MiB and even a series of 1 MiB mappings all died here while vm_allocate() could still hand
- * out 64 MiB, which is what finally identified this constant. 256 MiB of address space, not RAM.
- */
-#define IO_MAP_SIZE            (256ul << 20)
+#define IO_MAP_SIZE_DEFAULT    (8ul << 20)
 
+/*
+ * Every ml_io_map() comes out of this submap, and a full one panics. 8 MiB is
+ * enough for the phones that map only registers; iomapmib=N (8..1024) reserves
+ * N MiB of address space for ports that map a GPU arena.
+ */
 __startup_data static struct mach_vm_range io_range;
+__startup_data static vm_map_size_t io_map_size = IO_MAP_SIZE_DEFAULT;
 static SECURITY_READ_ONLY_LATE(vm_map_t) io_submap;
-KMEM_RANGE_REGISTER_STATIC(io_submap, &io_range, IO_MAP_SIZE);
+KMEM_RANGE_REGISTER_STATIC(io_submap, &io_range, IO_MAP_SIZE_DEFAULT);
+
+__startup_func
+static void
+io_map_size_init(void)
+{
+	uint32_t mib = 0;
+
+	if (PE_parse_boot_argn("iomapmib", &mib, sizeof(mib)) && mib >= 8 && mib <= 1024) {
+		io_map_size = (vm_map_size_t)mib << 20;
+		__startup_kmem_range_spec_io_submap.kc_size = io_map_size;
+	}
+}
+STARTUP(KMEM, STARTUP_RANK_FIRST, io_map_size_init);
 
 __startup_func
 static void
 io_map_init(void)
 {
 	vm_map_will_allocate_early_map(&io_submap);
-	io_submap = kmem_suballoc(kernel_map, &io_range.min_address, IO_MAP_SIZE,
+	io_submap = kmem_suballoc(kernel_map, &io_range.min_address, io_map_size,
 	    VM_MAP_CREATE_NEVER_FAULTS | VM_MAP_CREATE_DISABLE_HOLELIST,
 	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, KMS_PERMANENT | KMS_NOFAIL,
 	    VM_KERN_MEMORY_IOKIT).kmr_submap;
