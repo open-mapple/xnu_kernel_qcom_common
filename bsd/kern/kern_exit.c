@@ -1772,6 +1772,17 @@ proc_crash_coredump(proc_t p)
 #endif /* (DEVELOPMENT || DEBUG) && CONFIG_COREDUMP */
 }
 
+static bool
+sweet_crit_survive(void)
+{
+	static int on = -1;
+	if (on < 0) {
+		uint32_t v = 0;
+		on = PE_parse_boot_argn("critsurvive", &v, sizeof(v)) && v == 1;
+	}
+	return on;
+}
+
 static void
 proc_handle_critical_exit(proc_t p, int rv)
 {
@@ -1785,7 +1796,7 @@ proc_handle_critical_exit(proc_t p, int rv)
 	 * with an fstab line it cannot satisfy, for instance - has to be reported and survived: otherwise
 	 * every experiment with a bad mount entry costs a whole boot cycle.
 	 */
-	if (p != initproc) {
+	if (sweet_crit_survive() && p != initproc) {
 		printf("SWEET: %s[%d] exited with status %d (signal %d); not panicking\n",
 		    p->p_name, proc_getpid(p), WEXITSTATUS(rv), WTERMSIG(rv));
 		return;
