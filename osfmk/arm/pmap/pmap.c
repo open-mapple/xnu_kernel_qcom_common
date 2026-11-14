@@ -6881,8 +6881,13 @@ void
 pmap_sync_page_attributes_phys(
 	ppnum_t pp)
 {
-	/* ppnum_t is 32-bit: widen BEFORE shifting or RAM above 4 GiB wraps. */
-	vm_offset_t pa = (vm_offset_t)pp << PAGE_SHIFT;
+	/* ppnum_t is 32-bit: with pmapsyncwide=1 the page number is widened before the shift, so RAM above 4 GiB does not wrap. */
+	static int wide = -1;
+	if (wide < 0) {
+		uint32_t v = 0;
+		wide = PE_parse_boot_argn("pmapsyncwide", &v, sizeof(v)) && v == 1;
+	}
+	vm_offset_t pa = wide ? (vm_offset_t)pp << PAGE_SHIFT : (vm_offset_t)(pp << PAGE_SHIFT);
 #if defined(FUXI)
 	/* The GPU reservation is excluded from VM/physmap. Never send its PA
 	 * to the physical cache helpers; reuse its existing bounded NC alias. */
