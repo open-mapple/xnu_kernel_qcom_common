@@ -339,6 +339,9 @@ extern boolean_t PE_parse_boot_argn(
 	void            *arg_ptr,
 	int                     max_arg);
 
+extern int sweet_bf_enabled(void);      /* boot-arg sweetbf=1 */
+#define SWEET_BF(...) do { if (sweet_bf_enabled()) { printf(__VA_ARGS__); } } while (0)
+
 #if XNU_KERNEL_PRIVATE
 extern boolean_t PE_parse_boot_arg_str(
 	const char *arg_string,

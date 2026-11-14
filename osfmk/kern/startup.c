@@ -428,12 +428,12 @@ kernel_bootstrap(void)
 
 	printf("%s\n", version); /* log kernel version */
 
-	printf("SWEET BF: kernel_bootstrap enter\n");
+	SWEET_BF("SWEET BF: kernel_bootstrap enter\n");
 	scale_setup();
 
 	kernel_bootstrap_log("vm_mem_bootstrap");
 	vm_mem_bootstrap();
-	printf("SWEET BF: vm_mem_bootstrap ok\n");
+	SWEET_BF("SWEET BF: vm_mem_bootstrap ok\n");
 
 	machine_info.memory_size = (uint32_t)mem_size;
 #if XNU_TARGET_OS_OSX
@@ -450,7 +450,7 @@ kernel_bootstrap(void)
 	atm_init();
 #endif
 	kernel_startup_initialize_upto(STARTUP_SUB_OSLOG);
-	printf("SWEET BF: oslog ranks ok\n");
+	SWEET_BF("SWEET BF: oslog ranks ok\n");
 
 #if CONFIG_UBSAN_MINIMAL
 	kernel_bootstrap_log("UBSan minimal runtime init");
@@ -479,15 +479,15 @@ kernel_bootstrap(void)
 
 	kernel_bootstrap_log("console_init");
 	console_init();
-	printf("SWEET BF: console_init ok\n");
+	SWEET_BF("SWEET BF: console_init ok\n");
 
 	kernel_bootstrap_log("stackshot_init");
 	stackshot_init();
-	printf("SWEET BF: stackshot_init ok\n");
+	SWEET_BF("SWEET BF: stackshot_init ok\n");
 
 	kernel_bootstrap_log("sched_init");
 	sched_init();
-	printf("SWEET BF: sched_init ok\n");
+	SWEET_BF("SWEET BF: sched_init ok\n");
 
 #if CONFIG_MACF
 	kernel_bootstrap_log("mac_policy_init");
@@ -495,7 +495,7 @@ kernel_bootstrap(void)
 #endif
 
 	kernel_startup_initialize_upto(STARTUP_SUB_MACH_IPC);
-	printf("SWEET BF: mach_ipc ranks ok\n");
+	SWEET_BF("SWEET BF: mach_ipc ranks ok\n");
 
 	/*
 	 * As soon as the virtual memory system is up, we record
@@ -503,24 +503,24 @@ kernel_bootstrap(void)
 	 */
 	kernel_bootstrap_log("PMAP_ACTIVATE_KERNEL");
 	PMAP_ACTIVATE_KERNEL(master_cpu);
-	printf("SWEET BF: pmap_activate ok\n");
+	SWEET_BF("SWEET BF: pmap_activate ok\n");
 
 	kernel_bootstrap_log("mapping_free_prime");
 	mapping_free_prime();                                           /* Load up with temporary mapping blocks */
-	printf("SWEET BF: mapping_free_prime ok\n");
+	SWEET_BF("SWEET BF: mapping_free_prime ok\n");
 
 	kernel_bootstrap_log("machine_init");
-	printf("SWEET BF: machine_init enter\n");
+	SWEET_BF("SWEET BF: machine_init enter\n");
 	machine_init();
-	printf("SWEET BF: machine_init ok\n");
+	SWEET_BF("SWEET BF: machine_init ok\n");
 
 	kernel_bootstrap_log("thread_machine_init_template");
 	thread_machine_init_template();
-	printf("SWEET BF: thread_machine_init_template ok\n");
+	SWEET_BF("SWEET BF: thread_machine_init_template ok\n");
 
 	kernel_bootstrap_log("clock_init");
 	clock_init();
-	printf("SWEET BF: clock_init ok\n");
+	SWEET_BF("SWEET BF: clock_init ok\n");
 
 	/*
 	 *	Initialize the IPC, task, and thread subsystems.
@@ -541,18 +541,18 @@ kernel_bootstrap(void)
 
 	kernel_bootstrap_log("task_init");
 	task_init();
-	printf("SWEET BF: task_init ok\n");
+	SWEET_BF("SWEET BF: task_init ok\n");
 
 	kernel_bootstrap_log("thread_init");
 	thread_init();
-	printf("SWEET BF: thread_init ok\n");
+	SWEET_BF("SWEET BF: thread_init ok\n");
 
 	kernel_bootstrap_log("restartable_init");
 	restartable_init();
 
 	kernel_bootstrap_log("workq_init");
 	workq_init();
-	printf("SWEET BF: workq_init ok\n");
+	SWEET_BF("SWEET BF: workq_init ok\n");
 
 	kernel_bootstrap_log("turnstiles_init");
 	turnstiles_init();
@@ -566,7 +566,7 @@ kernel_bootstrap(void)
 	/* initialize exceptions */
 	kernel_bootstrap_log("exception_init");
 	exception_init();
-	printf("SWEET BF: exception_init ok\n");
+	SWEET_BF("SWEET BF: exception_init ok\n");
 
 #if CONFIG_SCHED_SFI
 	kernel_bootstrap_log("sfi_init");
@@ -578,7 +578,7 @@ kernel_bootstrap(void)
 	 */
 
 	kernel_bootstrap_log("kernel_thread_create");
-	printf("SWEET BF: kernel_thread_create enter\n");
+	SWEET_BF("SWEET BF: kernel_thread_create enter\n");
 	result = kernel_thread_create((thread_continue_t)kernel_bootstrap_thread, NULL, MAXPRI_KERNEL, &thread);
 
 	if (result != KERN_SUCCESS) {
@@ -593,7 +593,7 @@ kernel_bootstrap(void)
 	thread_deallocate(thread);
 
 	kernel_bootstrap_log("load_context - done");
-	printf("SWEET BF: load_context\n");
+	SWEET_BF("SWEET BF: load_context\n");
 	load_context(thread);
 	/*NOTREACHED*/
 }
@@ -612,7 +612,7 @@ static void
 kernel_bootstrap_thread(void)
 {
 	processor_t processor = current_processor();
-	printf("SWEET BF: bootstrap_thread enter\n");
+	SWEET_BF("SWEET BF: bootstrap_thread enter\n");
 
 #if (DEVELOPMENT || DEBUG)
 	platform_stall_panic_or_spin(PLATFORM_STALL_XNU_LOCATION_KERNEL_BOOTSTRAP);
@@ -623,7 +623,7 @@ kernel_bootstrap_thread(void)
 	 * Create the idle processor thread.
 	 */
 	idle_thread_create(processor);
-	printf("SWEET BF: idle_thread_create ok\n");
+	SWEET_BF("SWEET BF: idle_thread_create ok\n");
 
 	/*
 	 * N.B. Do not stick anything else
@@ -633,20 +633,20 @@ kernel_bootstrap_thread(void)
 	 */
 	kernel_bootstrap_thread_log("sched_startup");
 	sched_startup();
-	printf("SWEET BF: sched_startup ok\n");
+	SWEET_BF("SWEET BF: sched_startup ok\n");
 
 	/*
 	 * Thread lifecycle maintenance (teardown, stack allocation)
 	 */
 	kernel_bootstrap_thread_log("thread_daemon_init");
 	thread_daemon_init();
-	printf("SWEET BF: thread_daemon_init ok\n");
+	SWEET_BF("SWEET BF: thread_daemon_init ok\n");
 
 	/*
 	 * Thread callout service.
 	 */
 	kernel_startup_initialize_upto(STARTUP_SUB_THREAD_CALL);
-	printf("SWEET BF: thread_call ranks ok\n");
+	SWEET_BF("SWEET BF: thread_call ranks ok\n");
 
 	/*
 	 * Remain on current processor as
@@ -654,36 +654,36 @@ kernel_bootstrap_thread(void)
 	 */
 	kernel_bootstrap_thread_log("thread_bind");
 	thread_bind(processor);
-	printf("SWEET BF: thread_bind ok\n");
+	SWEET_BF("SWEET BF: thread_bind ok\n");
 
 	/*
 	 * Kick off memory mapping adjustments.
 	 */
 	kernel_bootstrap_thread_log("mapping_adjust");
 	mapping_adjust();
-	printf("SWEET BF: mapping_adjust ok\n");
+	SWEET_BF("SWEET BF: mapping_adjust ok\n");
 
 	/*
 	 *	Create the clock service.
 	 */
 	kernel_bootstrap_thread_log("clock_service_create");
 	clock_service_create();
-	printf("SWEET BF: clock_service_create ok\n");
+	SWEET_BF("SWEET BF: clock_service_create ok\n");
 
 	/*
 	 *	Create the device service.
 	 */
 	device_service_create();
-	printf("SWEET BF: device_service_create ok\n");
+	SWEET_BF("SWEET BF: device_service_create ok\n");
 
 	phys_carveout_init();
-	printf("SWEET BF: phys_carveout_init ok\n");
+	SWEET_BF("SWEET BF: phys_carveout_init ok\n");
 
 #if MACH_KDP
 	kernel_bootstrap_log("kdp_init");
-	printf("SWEET BF: kdp_init enter\n");
+	SWEET_BF("SWEET BF: kdp_init enter\n");
 	kdp_init();
-	printf("SWEET BF: kdp_init ok\n");
+	SWEET_BF("SWEET BF: kdp_init ok\n");
 #endif
 
 #if ALTERNATE_DEBUGGER
@@ -698,11 +698,11 @@ kernel_bootstrap_thread(void)
 #if CONFIG_TELEMETRY
 	kernel_bootstrap_log("bootprofile_init");
 	bootprofile_init();
-	printf("SWEET BF: bootprofile_init ok\n");
+	SWEET_BF("SWEET BF: bootprofile_init ok\n");
 #endif
 
 	kernel_startup_initialize_upto(STARTUP_SUB_SYSCTL);
-	printf("SWEET BF: sysctl ranks ok\n");
+	SWEET_BF("SWEET BF: sysctl ranks ok\n");
 
 	/*
 	 * Initialize the globals used for permuting kernel
@@ -719,9 +719,9 @@ kernel_bootstrap_thread(void)
 
 #ifdef  IOKIT
 	kernel_bootstrap_log("PE_init_iokit");
-	printf("SWEET BF: PE_init_iokit enter\n");
+	SWEET_BF("SWEET BF: PE_init_iokit enter\n");
 	PE_init_iokit();
-	printf("SWEET BF: PE_init_iokit ok\n");
+	SWEET_BF("SWEET BF: PE_init_iokit ok\n");
 #endif
 
 	assert(ml_get_interrupts_enabled() == FALSE);
@@ -737,19 +737,19 @@ kernel_bootstrap_thread(void)
 	ml_spin_debug_clear_self();
 #endif
 	(void) spllo();         /* Allow interruptions */
-	printf("SWEET BF: spllo (interrupts on) ok\n");
+	SWEET_BF("SWEET BF: spllo (interrupts on) ok\n");
 
 	/*
 	 * This will start displaying progress to the user, start as early as possible
 	 */
 	initialize_screen(NULL, kPEAcquireScreen);
-	printf("SWEET BF: initialize_screen ok\n");
+	SWEET_BF("SWEET BF: initialize_screen ok\n");
 
 	/*
 	 *	Initialize the shared region module.
 	 */
 	vm_commpage_init();
-	printf("SWEET BF: vm_commpage_init ok\n");
+	SWEET_BF("SWEET BF: vm_commpage_init ok\n");
 	vm_commpage_text_init();
 
 #if CONFIG_MACF
@@ -783,7 +783,7 @@ kernel_bootstrap_thread(void)
 #endif
 
 	kernel_startup_initialize_upto(STARTUP_SUB_LOCKDOWN);
-	printf("SWEET BF: lockdown ranks ok\n");
+	SWEET_BF("SWEET BF: lockdown ranks ok\n");
 
 	/*
 	 * Get rid of segments used to bootstrap kext loading. This removes
@@ -797,7 +797,7 @@ kernel_bootstrap_thread(void)
 	/* No changes to kernel text and rodata beyond this point. */
 	kernel_bootstrap_log("machine_lockdown");
 	machine_lockdown();
-	printf("SWEET BF: machine_lockdown ok\n");
+	SWEET_BF("SWEET BF: machine_lockdown ok\n");
 
 #ifdef CONFIG_XNUPOST
 	kern_return_t result = kernel_list_tests();
@@ -811,7 +811,7 @@ kernel_bootstrap_thread(void)
 #ifdef  IOKIT
 	kernel_bootstrap_log("PE_lockdown_iokit");
 	PE_lockdown_iokit();
-	printf("SWEET BF: PE_lockdown_iokit ok\n");
+	SWEET_BF("SWEET BF: PE_lockdown_iokit ok\n");
 #endif
 	/*
 	 * max_cpus must be nailed down by the time PE_lockdown_iokit() finishes,
@@ -828,7 +828,7 @@ kernel_bootstrap_thread(void)
 	 *	Start the user bootstrap.
 	 */
 #ifdef  MACH_BSD
-	printf("SWEET BF: bsd_init enter\n");
+	SWEET_BF("SWEET BF: bsd_init enter\n");
 	bsd_init();
 #endif
 

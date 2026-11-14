@@ -504,7 +504,7 @@ bsd_init(void)
 
 	throttle_init();
 
-	printf("SWEET BF: bsd_init launched\n");
+	SWEET_BF("SWEET BF: bsd_init launched\n");
 	printf(copyright);
 
 #if CONFIG_DEV_KMEM
@@ -695,7 +695,7 @@ bsd_init(void)
 	/* Initialize the file systems. */
 	bsd_init_kprintf("calling vfsinit\n");
 	vfsinit();
-	printf("SWEET BF: bsd_init: vfsinit ok\n");
+	SWEET_BF("SWEET BF: bsd_init: vfsinit ok\n");
 
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 	/* AMFI's MAC policy is built in on SWEET (bsd/kern/sweet_amfi.c). */
@@ -896,7 +896,7 @@ bsd_init(void)
 #endif
 
 		bsd_init_kprintf("vfs_mountroot\n");
-		printf("SWEET BF: bsd_init: vfs_mountroot enter\n");
+		SWEET_BF("SWEET BF: bsd_init: vfs_mountroot enter\n");
 		if (0 == (err = vfs_mountroot())) {
 			break;
 		}

@@ -141,3 +141,16 @@ sweet_early_disable(void)
 	__asm__ volatile("dsb sy" ::: "memory");
 }
 #endif /* SWEET */
+
+#include <pexpert/pexpert.h>
+
+int
+sweet_bf_enabled(void)
+{
+	static int on = -1;
+	if (on < 0) {
+		uint32_t v = 0;
+		on = PE_parse_boot_argn("sweetbf", &v, sizeof(v)) && v == 1;
+	}
+	return on;
+}
