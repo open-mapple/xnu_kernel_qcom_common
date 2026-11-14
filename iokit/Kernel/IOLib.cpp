@@ -1502,6 +1502,11 @@ IOFlushProcessorCache( task_t task, IOVirtualAddress address,
 	/* pmap.h is not on this file's include path; the type is a plain 64-bit physical address. */
 	extern uint64_t kvtophys(vm_offset_t va);
 
+	uint32_t by_pa = 0;
+	if (!PE_parse_boot_argn("ioflushpa", &by_pa, sizeof(by_pa)) || by_pa != 1) {
+		flush_dcache64((addr64_t) address, (unsigned) length, false );
+		return kIOReturnSuccess;
+	}
 	for (IOByteCount done = 0; done < length; done += PAGE_SIZE) {
 		uint64_t pa = kvtophys((vm_offset_t)address + done);
 		IOByteCount n = MIN((IOByteCount)PAGE_SIZE, length - done);
