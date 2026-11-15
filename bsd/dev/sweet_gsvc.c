@@ -41,6 +41,7 @@
 #include <arm/caches_internal.h>
 #include <vm/pmap.h>
 #include <vm/vm_kern.h>
+#include <pexpert/pexpert.h>
 #include "sweet_gpu_internal.h"
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
@@ -182,6 +183,22 @@ static bool gs_ready, gs_window, gs_latches;
 static uint32_t gs_cur_khz = 180000u, gs_max_khz = 180000u;
 static uint32_t gs_win_used[GS_WIN_PAGES / 32u];        /* 1 = window page in use */
 static struct gs_bo gs_bos[GS_MAX_BO];
+
+/*
+ * sweetgpuvm=1: the window becomes real page tables. 1 GiB of 4 KiB pages in 512 level-3 tables, 2,048 BOs of up to 64 MiB,
+ * BO memory from scattered wired pages (not contiguous) mapped page by page. The tables and the BO table come from XNU
+ * memory, so their entries are cleaned to the point of coherency as they are written. Without the boot-arg the sizes
+ * and the carve-outs above are used and none of this runs.
+ */
+#define GS_VM_L3_TABLES         512u
+#define GS_VM_WIN_PAGES         (GS_VM_L3_TABLES * 512u)
+#define GS_VM_MAX_BO            2048u
+#define GS_VM_BO_MAX_BYTES      (64u << 20)
+static bool gs_vm;
+static uint32_t gs_win_pages = GS_WIN_PAGES, gs_l3_tables = GS_L3_TABLES, gs_bo_max = GS_MAX_BO;
+static uint32_t gs_bo_bytes_max = GS_BO_MAX_BYTES;
+static uint32_t *gs_win_bits = gs_win_used;
+static struct gs_bo *gs_bo_tab = gs_bos;
 
 /* Test buffers from 6.0, used raw in 6.3 */
 static vm_offset_t gs_tbuf, gs_tspare;
@@ -518,7 +535,7 @@ gs_round(uint32_t size)
 static bool
 gs_win_busy(uint32_t p)
 {
-	return (gs_win_used[p / 32u] >> (p % 32u)) & 1u;
+	return (gs_win_bits[p / 32u] >> (p % 32u)) & 1u;
 }
 
 static void
@@ -526,9 +543,9 @@ gs_win_mark(uint32_t p, uint32_t n, bool used)
 {
 	for (uint32_t i = p; i < p + n; ++i) {
 		if (used) {
-			gs_win_used[i / 32u] |= 1u << (i % 32u);
+			gs_win_bits[i / 32u] |= 1u << (i % 32u);
 		} else {
-			gs_win_used[i / 32u] &= ~(1u << (i % 32u));
+			gs_win_bits[i / 32u] &= ~(1u << (i % 32u));
 		}
 	}
 }
@@ -537,7 +554,7 @@ static int
 gs_win_alloc(uint32_t n)
 {
 	uint32_t run = 0;
-	for (uint32_t p = 0; p < GS_WIN_PAGES; ++p) {
+	for (uint32_t p = 0; p < gs_win_pages; ++p) {
 		run = gs_win_busy(p) ? 0 : run + 1u;
 		if (run == n) {
 			gs_win_mark(p + 1u - n, n, true);
@@ -551,7 +568,7 @@ static uint32_t
 gs_win_count(void)
 {
 	uint32_t n = 0;
-	for (uint32_t p = 0; p < GS_WIN_PAGES; ++p) {
+	for (uint32_t p = 0; p < gs_win_pages; ++p) {
 		n += gs_win_busy(p);
 	}
 	return n;
@@ -568,12 +585,18 @@ static void
 gs_win_map(uint32_t page, uint64_t pa)
 {
 	gs_l3[page] = (pa & GS_PTE_ADDR_MASK) | GS_PTE_PAGE_RW;
+	if (gs_vm) {
+		flush_dcache64(gs_l3_pa + (uint64_t)page * sizeof(uint64_t), sizeof(uint64_t), TRUE);
+	}
 }
 
 static void
 gs_win_unmap(uint32_t page)
 {
 	gs_l3[page] = 0;
+	if (gs_vm) {
+		flush_dcache64(gs_l3_pa + (uint64_t)page * sizeof(uint64_t), sizeof(uint64_t), TRUE);
+	}
 }
 
 static bool
@@ -600,6 +623,33 @@ gs_carve(uint32_t len, volatile void **va, uint64_t *pa, const char *name)
 		*(volatile uint32_t *)(v + i) = 0;
 	}
 	printf("SWEET GSVC:   %-12s pa/iova %#llx, %#x bytes, zeroed\n", name, *pa, len);
+	return true;
+}
+
+/* sweetgpuvm=1: the window's tables, the window bitmap and the BO table, from XNU memory */
+static bool
+gs_vm_init(void)
+{
+	vm_offset_t v = gs_kalloc(gs_round(GS_PAGE), &gs_l2_pa);
+	vm_offset_t t = v ? gs_kalloc(GS_VM_L3_TABLES * GS_PAGE, &gs_l3_pa) : 0;
+	vm_offset_t bits = 0, tab = 0;
+	if (t && kmem_alloc(kernel_map, &bits, GS_VM_WIN_PAGES / 8u, KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT) == KERN_SUCCESS) {
+		(void)kmem_alloc(kernel_map, &tab, GS_VM_MAX_BO * sizeof(struct gs_bo), KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT);
+	}
+	if (!v || !t || !bits || !tab) {
+		printf("SWEET GSVC: 6.0: no memory for the sweetgpuvm tables\n");
+		return false;
+	}
+	gs_l2 = (volatile uint64_t *)v;
+	gs_l3 = (volatile uint64_t *)t;
+	gs_win_bits = (uint32_t *)bits;
+	gs_bo_tab = (struct gs_bo *)tab;
+	gs_win_pages = GS_VM_WIN_PAGES;
+	gs_l3_tables = GS_VM_L3_TABLES;
+	gs_bo_max = GS_VM_MAX_BO;
+	gs_bo_bytes_max = GS_VM_BO_MAX_BYTES;
+	printf("SWEET GSVC:   sweetgpuvm=1: window of %u pages (%u MiB) in %u level-3 tables, level-2 pa %#llx, level-3 pa %#llx, %u BOs\n",
+	    gs_win_pages, gs_win_pages * GS_PAGE >> 20, gs_l3_tables, gs_l2_pa, gs_l3_pa, gs_bo_max);
 	return true;
 }
 
@@ -644,14 +694,20 @@ gs_survey(void)
 		return false;
 	}
 	gs_ib = (volatile uint32_t *)v;
-	if (!gs_carve(GS_PAGE, &v, &gs_l2_pa, "window L2")) {
-		return false;
+	if (gs_vm) {
+		if (!gs_vm_init()) {
+			return false;
+		}
+	} else {
+		if (!gs_carve(GS_PAGE, &v, &gs_l2_pa, "window L2")) {
+			return false;
+		}
+		gs_l2 = (volatile uint64_t *)v;
+		if (!gs_carve(GS_L3_TABLES * GS_PAGE, &v, &gs_l3_pa, "window L3s")) {
+			return false;
+		}
+		gs_l3 = (volatile uint64_t *)v;
 	}
-	gs_l2 = (volatile uint64_t *)v;
-	if (!gs_carve(GS_L3_TABLES * GS_PAGE, &v, &gs_l3_pa, "window L3s")) {
-		return false;
-	}
-	gs_l3 = (volatile uint64_t *)v;
 	__asm__ volatile("dsb sy" ::: "memory");
 
 	gs_tbuf_size = gs_round(4u * GS_PAGE);
@@ -934,14 +990,17 @@ gs_ibs(void)
 
 	/* The window */
 	gpu_pause("6.3 level-1 entry 8 -> the window's level-2 table, then bank 0 TLBIALL");
-	for (unsigned t = 0; t < GS_L3_TABLES; ++t) {
+	for (unsigned t = 0; t < gs_l3_tables; ++t) {
 		gs_l2[t] = (gs_l3_pa + (uint64_t)t * GS_PAGE) | GS_PTE_TABLE;
+	}
+	if (gs_vm) {
+		flush_dcache64(gs_l2_pa, GS_PAGE, TRUE);
 	}
 	__asm__ volatile("dsb sy" ::: "memory");
 	gs_l1[GS_WIN_L1] = gs_l2_pa | GS_PTE_TABLE;
 	ok = gs_tlbi("6.3 window on");
 	printf("SWEET GSVC:   level-1 entry %u = 0x%016llx: GPU VA %#llx..%#llx, %u pages\n", GS_WIN_L1, gs_l1[GS_WIN_L1],
-	    GS_WIN_BASE, gs_win_va(GS_WIN_PAGES) - 1u, GS_WIN_PAGES);
+	    GS_WIN_BASE, gs_win_va(gs_win_pages) - 1u, gs_win_pages);
 	gs_window = ok;
 
 	volatile uint32_t *tb = (volatile uint32_t *)gs_tbuf, *sp = (volatile uint32_t *)gs_tspare;
@@ -1012,10 +1071,10 @@ gs_ibs(void)
 static struct gs_bo *
 gs_bo_get(uint32_t handle)
 {
-	if (handle == 0 || handle > GS_MAX_BO || !gs_bos[handle - 1u].used) {
+	if (handle == 0 || handle > gs_bo_max || !gs_bo_tab[handle - 1u].used) {
 		return NULL;
 	}
-	return &gs_bos[handle - 1u];
+	return &gs_bo_tab[handle - 1u];
 }
 
 static bool
@@ -1030,31 +1089,63 @@ sweet_gsvc_bo_new(uint32_t size, uint32_t flags, uint32_t *handle, uint64_t *gpu
 	if (!gs_usable()) {
 		return ENXIO;
 	}
-	if (flags || size == 0 || size > GS_BO_MAX_BYTES) {
+	if (flags || size == 0 || size > gs_bo_bytes_max) {
 		return EINVAL;
 	}
 	uint32_t ksize = gs_round(size), n = ksize / GS_PAGE;
 	uint64_t pa = 0;
-	vm_offset_t va = gs_kalloc(ksize, &pa);
+	vm_offset_t va = 0;
+	if (gs_vm) {
+		/* scattered wired pages; zeroed memory is cleaned out of the CPU cache before the GPU can read it */
+		if (kmem_alloc(kernel_map, &va, ksize, KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT) == KERN_SUCCESS) {
+			flush_dcache64((addr64_t)va, ksize, FALSE);
+		} else {
+			va = 0;
+		}
+	} else {
+		va = gs_kalloc(ksize, &pa);
+	}
 	if (!va) {
 		return ENOMEM;
 	}
 	lck_mtx_lock(&gs_lock);
 	unsigned h = 0;
-	while (h < GS_MAX_BO && gs_bos[h].used) {
+	while (h < gs_bo_max && gs_bo_tab[h].used) {
 		++h;
 	}
-	int page = h < GS_MAX_BO ? gs_win_alloc(n) : -1;
+	int page = h < gs_bo_max ? gs_win_alloc(n) : -1;
 	if (page < 0) {
 		lck_mtx_unlock(&gs_lock);
 		kmem_free(kernel_map, va, ksize);
 		return ENOMEM;
 	}
-	for (uint32_t i = 0; i < n; ++i) {
-		gs_win_map((uint32_t)page + i, pa + (uint64_t)i * GS_PAGE);
+	if (gs_vm) {
+		uint32_t done = 0;
+		bool whole = true;
+		for (uint32_t off = 0; off < ksize && whole; off += (uint32_t)PAGE_SIZE) {
+			ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)(va + off));
+			whole = pn != 0;
+			for (uint32_t k = 0; whole && k < PAGE_SIZE / GS_PAGE; ++k, ++done) {
+				gs_win_map((uint32_t)page + done, ptoa_64(pn) + (uint64_t)k * GS_PAGE);
+			}
+		}
+		if (!whole) {
+			for (uint32_t i = 0; i < done; ++i) {
+				gs_win_unmap((uint32_t)page + i);
+			}
+			(void)gs_tlbi("bo new failed");
+			gs_win_mark((uint32_t)page, n, false);
+			lck_mtx_unlock(&gs_lock);
+			kmem_free(kernel_map, va, ksize);
+			return ENOMEM;
+		}
+	} else {
+		for (uint32_t i = 0; i < n; ++i) {
+			gs_win_map((uint32_t)page + i, pa + (uint64_t)i * GS_PAGE);
+		}
 	}
 	bool tlb = gs_tlbi("bo new");
-	gs_bos[h] = (struct gs_bo){ .used = true, .owned = true, .va = va, .pa = pa, .size = ksize, .page = (uint32_t)page };
+	gs_bo_tab[h] = (struct gs_bo){ .used = true, .owned = true, .va = va, .pa = pa, .size = ksize, .page = (uint32_t)page };
 	lck_mtx_unlock(&gs_lock);
 	*handle = h + 1u;
 	*gpu_va = gs_win_va((uint32_t)page);
@@ -1069,7 +1160,7 @@ sweet_gsvc_bo_import_pages(const uint64_t *pa, uint32_t npages, uint32_t *handle
 	if (!gs_usable()) {
 		return ENXIO;
 	}
-	if (npages == 0 || npages > GS_BO_MAX_BYTES / GS_PAGE) {
+	if (npages == 0 || npages > gs_bo_bytes_max / GS_PAGE) {
 		return EINVAL;
 	}
 	for (uint32_t i = 0; i < npages; ++i) {
@@ -1079,10 +1170,10 @@ sweet_gsvc_bo_import_pages(const uint64_t *pa, uint32_t npages, uint32_t *handle
 	}
 	lck_mtx_lock(&gs_lock);
 	unsigned h = 0;
-	while (h < GS_MAX_BO && gs_bos[h].used) {
+	while (h < gs_bo_max && gs_bo_tab[h].used) {
 		++h;
 	}
-	int page = h < GS_MAX_BO ? gs_win_alloc(npages) : -1;
+	int page = h < gs_bo_max ? gs_win_alloc(npages) : -1;
 	if (page < 0) {
 		lck_mtx_unlock(&gs_lock);
 		return ENOMEM;
@@ -1091,7 +1182,7 @@ sweet_gsvc_bo_import_pages(const uint64_t *pa, uint32_t npages, uint32_t *handle
 		gs_win_map((uint32_t)page + i, pa[i]);
 	}
 	bool tlb = gs_tlbi("bo import");
-	gs_bos[h] = (struct gs_bo){ .used = true, .owned = false, .va = 0, .pa = pa[0], .size = npages * GS_PAGE,
+	gs_bo_tab[h] = (struct gs_bo){ .used = true, .owned = false, .va = 0, .pa = pa[0], .size = npages * GS_PAGE,
 		                    .page = (uint32_t)page };
 	lck_mtx_unlock(&gs_lock);
 	*handle = h + 1u;
@@ -1136,7 +1227,11 @@ sweet_gsvc_bo_sync(uint32_t handle)
 	lck_mtx_lock(&gs_lock);
 	struct gs_bo *bo = gs_bo_get(handle);
 	if (bo && bo->owned) {
-		flush_dcache64((addr64_t)bo->pa, bo->size, TRUE);
+		if (gs_vm) {
+			flush_dcache64((addr64_t)bo->va, bo->size, FALSE);      /* scattered pages: by the kernel address */
+		} else {
+			flush_dcache64((addr64_t)bo->pa, bo->size, TRUE);
+		}
 	}
 	lck_mtx_unlock(&gs_lock);
 	return bo ? 0 : EINVAL;
@@ -1184,7 +1279,7 @@ sweet_gsvc_info(struct sweet_gsvc_info *info)
 		.chip_id = GS_CHIP_ID, .gmem_size = GS_GMEM_SIZE, .gmem_base = GS_GMEM_BASE,
 		.cur_khz = gs_cur_khz, .max_khz = gs_max_khz, .last_retired = gs_fence ? gs_fence[0] : 0,
 		.flags = (gs_ready ? SWEET_GSVC_READY : 0u) | (gs_dead ? SWEET_GSVC_DEAD : 0u),
-		.fence_pa = gs_fence_pa, .window_base = GS_WIN_BASE, .window_size = (uint64_t)GS_WIN_PAGES * GS_PAGE,
+		.fence_pa = gs_fence_pa, .window_base = GS_WIN_BASE, .window_size = (uint64_t)gs_win_pages * GS_PAGE,
 	};
 }
 
@@ -1457,6 +1552,9 @@ sweet_gsvc_run(int stop, int cb, vm_offset_t l1_va, uint64_t l1_pa)
 {
 	printf("SWEET GSVC: stage 6 (sweetgpu=8 sweetsvc=%d): the kernel GPU service on SMMU bank %d\n", stop, cb);
 	gs_cb = cb;
+	uint32_t vm = 0;
+	(void)PE_parse_boot_argn("sweetgpuvm", &vm, sizeof(vm));
+	gs_vm = vm == 1;
 	gs_l1 = (volatile uint64_t *)l1_va;
 	gs_l1_pa = l1_pa;
 	int step = 0;

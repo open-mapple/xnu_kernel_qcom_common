@@ -41,7 +41,7 @@ int sweet_gsvc_wait(uint32_t seq, uint32_t timeout_ms);
 void sweet_gsvc_info(struct sweet_gsvc_info *info);
 }
 
-#define SG_MAX_BO       64u     /* sweet_gsvc.c's table */
+#define SG_MAX_BO       2048u   /* the table of sweet_gsvc.c with sweetgpuvm=1 (64 without it) */
 #define SG_MAX_IBS      16u
 #define SG_MAX_BOS      1024u   /* entries of a submit's BO table */
 #define SG_GPU_ID       618u
