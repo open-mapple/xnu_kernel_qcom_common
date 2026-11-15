@@ -1,0 +1,44 @@
+Open Mapple: the XNU kernel, common to Qualcomm phones.
+
+- Apple's XNU (xnu-8796.141.3), libpthread (514.100.2), HFS (627.100.6) and IOHIDFamily headers: Apple Public Source License 2.0
+  (APPLE_LICENSE). Changes to Apple's files are under the same licence, and Apple's notices stay in them.
+- ios-sweet (github.com/dipa-studio/ios-sweet): its patch series for the Redmi Note 10 Pro, by dipa-studio and damjankakak3, with changes
+  from legendxdevil and 2010475745xie in the repository. The files it adds are MIT, Copyright (c) 2026 dipa-studio; its changes to Apple's
+  files are APSL 2.0.
+- ios-sweet-pixel, branch sunfish (github.com/hellagarage/ios-sweet-pixel): the Pixel 4a and Adreno 618 work of frokfrdk and hellagarage
+  (one commit under another name), on top of ios-sweet. MIT.
+- ios-fajita (github.com/edi194/ios-fajita) and ios-fuxi (github.com/bangprovn/ios-fuxi): their changes to Apple's files only (APSL 2.0),
+  by edi194 and bangprovn. Neither repository has a licence of its own; nothing else of theirs is here. Their pieces are replayed with
+  their authors and say so in an Imported-from: line.
+- darwin-xnu-build (github.com/blacktop/darwin-xnu-build): its build fixes. MIT, Copyright (c) 2023-2025 blacktop.
+- BearSSL (Thomas Pornin), libkern/crypto/sweet_bearssl/: MIT, its LICENSE.txt.
+- iokit/Kernel/arm/sweet_msm.h: the structures of Linux's msm DRM interface (include/uapi/drm/msm_drm.h, Copyright (C) 2013 Red Hat,
+  Rob Clark), MIT, notice kept in the file.
+
+A commit taken from another project names it in its Imported-from: line.
+Not in this repository: any file of iOS, any vendor firmware.
+
+The MIT licence of ios-sweet, ios-sweet-pixel and darwin-xnu-build:
+
+MIT License
+
+Copyright (c) 2026 dipa-studio
+Copyright (c) 2023-2025 blacktop
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
