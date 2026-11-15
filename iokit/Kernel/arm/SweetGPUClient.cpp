@@ -94,7 +94,7 @@ private:
 
 	task_t fTask;
 	IOLock *fLock;
-	Bo fBo[SG_MAX_BO + 1];
+	Bo *fBo;                        /* SG_MAX_BO + 1 entries: too big to sit in the object */
 	uint32_t fQueues;
 	uint32_t fLastFence;
 	bool fClosed;
@@ -166,13 +166,17 @@ SweetGPUClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
 	}
 	fTask = owningTask;
 	fLock = IOLockAlloc();
-	return fLock != NULL;
+	fBo = (Bo *)IOMalloc((SG_MAX_BO + 1) * sizeof(Bo));
+	if (fBo != NULL) {
+		bzero(fBo, (SG_MAX_BO + 1) * sizeof(Bo));
+	}
+	return fLock != NULL && fBo != NULL;
 }
 
 IOReturn
 SweetGPUClient::clientClose(void)
 {
-	if (fLock == NULL) {
+	if (fLock == NULL || fBo == NULL) {
 		return kIOReturnSuccess;
 	}
 	IOLockLock(fLock);
@@ -199,6 +203,10 @@ SweetGPUClient::clientClose(void)
 void
 SweetGPUClient::free(void)
 {
+	if (fBo != NULL) {
+		IOFree(fBo, (SG_MAX_BO + 1) * sizeof(Bo));
+		fBo = NULL;
+	}
 	if (fLock != NULL) {
 		IOLockFree(fLock);
 		fLock = NULL;
